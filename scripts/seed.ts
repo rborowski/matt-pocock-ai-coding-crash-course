@@ -56,6 +56,7 @@ async function seed() {
     DROP TABLE IF EXISTS team_members;
     DROP TABLE IF EXISTS teams;
     DROP TABLE IF EXISTS purchases;
+    DROP TABLE IF EXISTS ratings;
     DROP TABLE IF EXISTS enrollments;
     DROP TABLE IF EXISTS lessons;
     DROP TABLE IF EXISTS modules;
@@ -1470,6 +1471,66 @@ You've completed the Building REST APIs course. You now have the skills to build
 
   console.log("Created lesson progress records.");
 
+  // ─── Ratings ───
+  // Only (user, course) pairs with an existing enrollment may rate — never an
+  // instructor rating their own course. Spread is deliberately mixed, not all 5s.
+
+  db.insert(schema.ratings)
+    .values([
+      {
+        userId: students[0].id,
+        courseId: course1.id,
+        rating: 5,
+        createdAt: daysAgo(20),
+        updatedAt: daysAgo(20),
+      },
+      {
+        userId: students[0].id,
+        courseId: course2.id,
+        rating: 4,
+        createdAt: daysAgo(15),
+        updatedAt: daysAgo(15),
+      },
+      {
+        userId: students[1].id,
+        courseId: course1.id,
+        rating: 5,
+        createdAt: daysAgo(9),
+        updatedAt: daysAgo(9),
+      },
+      {
+        userId: students[2].id,
+        courseId: course1.id,
+        rating: 3,
+        createdAt: daysAgo(25),
+        updatedAt: daysAgo(25),
+      },
+      {
+        userId: students[2].id,
+        courseId: course2.id,
+        rating: 4,
+        createdAt: daysAgo(12),
+        updatedAt: daysAgo(12),
+      },
+      {
+        userId: students[3].id,
+        courseId: course2.id,
+        rating: 2,
+        createdAt: daysAgo(18),
+        updatedAt: daysAgo(18),
+      },
+      {
+        userId: students[4].id,
+        courseId: course1.id,
+        rating: 3,
+        createdAt: daysAgo(5),
+        updatedAt: daysAgo(5),
+      },
+    ])
+    .run();
+
+  console.log("Created 7 ratings.");
+
   // ─── Quiz Attempts ───
 
   // Helper to record a quiz attempt with answers
@@ -1735,6 +1796,7 @@ You've completed the Building REST APIs course. You now have the skills to build
   );
   console.log("  Quizzes: 3");
   console.log("  Enrollments: 7");
+  console.log("  Ratings: 7");
   console.log("  Purchases: 6 (5 individual + 1 team)");
   console.log("  Teams: 1 (with 5 coupons)");
 }

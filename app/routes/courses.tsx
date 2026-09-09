@@ -2,6 +2,7 @@ import { Form, Link, useSearchParams, useNavigation, isRouteErrorResponse } from
 import type { Route } from "./+types/courses";
 import { buildCourseQuery, getLessonCountForCourse } from "~/services/courseService";
 import { getAllCategories } from "~/services/categoryService";
+import { getAverageRating } from "~/services/ratingService";
 import { CourseStatus } from "~/db/schema";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
@@ -9,6 +10,7 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { AlertTriangle, BookOpen, Search } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
+import { RatingSummary } from "~/components/star-rating";
 import { getCurrentUserId } from "~/lib/session";
 import { formatPrice } from "~/lib/utils";
 import { getUserEnrolledCourses } from "~/services/enrollmentService";
@@ -65,6 +67,7 @@ export async function loader({ request, url }: Route.LoaderArgs) {
       progress: userProgress?.progress ?? null,
       completedLessons: userProgress?.completedLessons ?? null,
       pppPrice,
+      rating: getAverageRating(course.id),
     };
   });
 
@@ -80,6 +83,7 @@ function CourseCardSkeleton() {
       <CardHeader>
         <Skeleton className="mb-1 h-3 w-16" />
         <Skeleton className="h-5 w-3/4" />
+        <Skeleton className="mt-1.5 h-3 w-24" />
       </CardHeader>
       <CardContent>
         <Skeleton className="mb-1 h-3 w-full" />
@@ -203,6 +207,13 @@ export default function CourseCatalog({ loaderData }: Route.ComponentProps) {
                   <h3 className="text-lg font-semibold leading-tight group-hover:text-primary">
                     {course.title}
                   </h3>
+                  <div className="mt-1.5 text-xs">
+                    <RatingSummary
+                      average={course.rating.average}
+                      count={course.rating.count}
+                      size="size-3.5"
+                    />
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <p className="line-clamp-2 text-sm text-muted-foreground">

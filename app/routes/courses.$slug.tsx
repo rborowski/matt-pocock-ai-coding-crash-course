@@ -1,6 +1,7 @@
-import { useEffect } from "react";
-import { Link, useSearchParams } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, useFetcher, useSearchParams } from "react-router";
 import { toast } from "sonner";
+import { z } from "zod";
 import type { Route } from "./+types/courses.$slug";
 import {
   getCourseBySlug,
@@ -13,8 +14,16 @@ import {
   getLessonProgressForCourse,
   getNextIncompleteLesson,
 } from "~/services/progressService";
+import {
+  canUserRateCourse,
+  getAverageRating,
+  getRatingByUser,
+  getRatingDistribution,
+  rateCourse,
+} from "~/services/ratingService";
 import { getCurrentUserId } from "~/lib/session";
-import { LessonProgressStatus } from "~/db/schema";
+import { parseFormData, parseParams } from "~/lib/validation";
+import { CourseStatus, LessonProgressStatus } from "~/db/schema";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -33,10 +42,12 @@ import {
   Clock,
   Pencil,
   PlayCircle,
+  Star,
   Users,
 } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { UserAvatar } from "~/components/user-avatar";
+import { RatingSummary, StarPicker, StarRow } from "~/components/star-rating";
 import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
@@ -102,6 +113,21 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     : courseWithDetails.price;
   const tierInfo = getCountryTierInfo(country);
 
+  // Ratings are only surfaced for published courses — drafts/archived courses
+  // show no rating UI at all.
+  const isPublished = courseWithDetails.status === CourseStatus.Published;
+  const rating = isPublished ? getAverageRating(course.id) : null;
+  const ratingDistribution = isPublished ? getRatingDistribution(course.id) : null;
+
+  let canRate = false;
+  let userRating: number | null = null;
+  if (currentUserId) {
+    // canUserRateCourse enforces the published-only rule itself, so there's
+    // no need to gate on isPublished here too.
+    canRate = canUserRateCourse(currentUserId, course.id);
+    userRating = getRatingByUser(currentUserId, course.id)?.rating ?? null;
+  }
+
   return {
     course: courseWithDetails,
     salesCopyHtml,
@@ -113,10 +139,64 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     currentUserId,
     pppPrice,
     tierInfo,
+    rating,
+    ratingDistribution,
+    canRate,
+    userRating,
   };
 }
 
-// No action — enrollment is handled via the purchase confirmation page
+const courseSlugParamsSchema = z.object({
+  slug: z.string().min(1),
+});
+
+const courseDetailActionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("rate-course"),
+    rating: z.coerce.number().int().min(1).max(5),
+  }),
+]);
+
+export async function action({ request, params }: Route.ActionArgs) {
+  const { slug } = parseParams(params, courseSlugParamsSchema);
+
+  const course = getCourseBySlug(slug);
+  if (!course) {
+    throw data("Course not found", { status: 404 });
+  }
+
+  const currentUserId = await getCurrentUserId(request);
+
+  if (!currentUserId) {
+    throw data("You must be logged in to rate a course.", { status: 401 });
+  }
+
+  const formData = await request.formData();
+  const parsed = parseFormData(formData, courseDetailActionSchema);
+
+  if (!parsed.success) {
+    return data(
+      { error: Object.values(parsed.errors)[0] ?? "Invalid input." },
+      { status: 400 }
+    );
+  }
+
+  const { intent } = parsed.data;
+
+  if (intent === "rate-course") {
+    try {
+      rateCourse(currentUserId, course.id, parsed.data.rating);
+      return { success: true };
+    } catch (e) {
+      return data(
+        { error: e instanceof Error ? e.message : "Failed to save rating." },
+        { status: 400 }
+      );
+    }
+  }
+
+  throw data("Invalid action.", { status: 400 });
+}
 
 export function HydrateFallback() {
   return (
@@ -181,6 +261,10 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     currentUserId,
     pppPrice,
     tierInfo,
+    rating,
+    ratingDistribution,
+    canRate,
+    userRating,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -320,6 +404,14 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
               {formatDuration(totalDuration, true, false, false)} total
             </span>
           )}
+          {rating && (
+            <RatingSummary
+              average={rating.average}
+              count={rating.count}
+              size="size-4"
+              className="text-sm"
+            />
+          )}
         </div>
       </div>
 
@@ -334,6 +426,17 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
             />
           ) : (
             <p className="text-muted-foreground">{course.description}</p>
+          )}
+
+          {rating && ratingDistribution && (
+            <div className="mt-8">
+              <h2 className="mb-4 text-2xl font-bold">Ratings</h2>
+              <RatingDistributionPanel
+                average={rating.average}
+                count={rating.count}
+                distribution={ratingDistribution}
+              />
+            </div>
           )}
 
           {/* Bottom CTA */}
@@ -413,6 +516,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                       Buy More Seats
                     </Button>
                   </Link>
+                  {canRate && <CourseRatingPicker userRating={userRating} />}
                 </>
               ) : (
                 enrollButton
@@ -446,6 +550,120 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
           </Card>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RatingDistributionPanel({
+  average,
+  count,
+  distribution,
+}: {
+  average: number;
+  count: number;
+  distribution: Record<1 | 2 | 3 | 4 | 5, number>;
+}) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        {count === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-6 text-center">
+            <Star className="size-8 text-muted-foreground/30" />
+            <p className="text-sm text-muted-foreground">
+              No ratings yet. Be the first to rate this course.
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-8 sm:grid-cols-[auto_1fr]">
+            <div className="text-center">
+              <div className="text-5xl font-bold tracking-tight">
+                {average.toFixed(1)}
+              </div>
+              <StarRow value={average} size="size-4" />
+              <div className="mt-1 text-xs text-muted-foreground">
+                {count} {count === 1 ? "rating" : "ratings"}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              {([5, 4, 3, 2, 1] as const).map((star) => {
+                const n = distribution[star];
+                const pct = count > 0 ? (n / count) * 100 : 0;
+                return (
+                  <div key={star} className="flex items-center gap-2 text-xs">
+                    <span className="w-3 text-muted-foreground">{star}</span>
+                    <Star className="size-3 fill-amber-400 text-amber-400" />
+                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-amber-400"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    <span className="w-8 text-right text-muted-foreground">
+                      {n}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CourseRatingPicker({ userRating }: { userRating: number | null }) {
+  const fetcher = useFetcher<typeof action>();
+  // Holds a value only while a submission is in flight. Loader data stays the
+  // source of truth, so a revalidation (switching users, navigating back) always
+  // shows the current user's own rating rather than stale component state.
+  const [pendingRating, setPendingRating] = useState<number | null>(null);
+  const isSubmitting = fetcher.state !== "idle";
+  const displayedRating = pendingRating ?? userRating ?? 0;
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data) {
+      if ("success" in fetcher.data && fetcher.data.success) {
+        toast.success("Thanks for rating this course!");
+      } else if ("error" in fetcher.data) {
+        toast.error(fetcher.data.error);
+      }
+      // Clear the override either way: on success the revalidated loader carries
+      // the new rating, on failure this reverts to the persisted one.
+      setPendingRating(null);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  function handleChange(nextRating: number) {
+    setPendingRating(nextRating);
+    fetcher.submit(
+      {
+        intent: "rate-course",
+        rating: String(nextRating),
+      },
+      { method: "post" }
+    );
+  }
+
+  return (
+    <div className="border-t pt-4">
+      <p className="mb-1 text-sm font-medium">Rate this course</p>
+      <p className="mb-2 text-xs text-muted-foreground">
+        Available because you're enrolled in this course.
+      </p>
+      <StarPicker
+        value={displayedRating}
+        onChange={handleChange}
+        size="size-7"
+        disabled={isSubmitting}
+      />
+      <p className="mt-2 text-xs text-muted-foreground">
+        {isSubmitting
+          ? "Saving..."
+          : displayedRating
+            ? `You rated this ${displayedRating}/5 — click a star to update.`
+            : "Tap a star to rate."}
+      </p>
     </div>
   );
 }

@@ -2,6 +2,7 @@ import { Link } from "react-router";
 import type { Route } from "./+types/instructor";
 import { getCoursesByInstructor, getLessonCountForCourse } from "~/services/courseService";
 import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
+import { getAverageRating } from "~/services/ratingService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
@@ -9,6 +10,7 @@ import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
+import { RatingSummary } from "~/components/star-rating";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
 
@@ -41,6 +43,11 @@ export async function loader({ request }: Route.LoaderArgs) {
   const coursesWithStats = instructorCourses.map((course) => {
     const lessonCount = getLessonCountForCourse(course.id);
     const enrollmentCount = getEnrollmentCountForCourse(course.id);
+    // Ratings are only meaningful once a course is published.
+    const rating =
+      course.status === CourseStatus.Published
+        ? getAverageRating(course.id)
+        : null;
 
     return {
       id: course.id,
@@ -53,6 +60,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       enrollmentCount,
       createdAt: course.createdAt,
       updatedAt: course.updatedAt,
+      rating,
     };
   });
 
@@ -205,6 +213,15 @@ export default function InstructorDashboard({
                     </span>
                   </div>
                 </div>
+                {course.rating && (
+                  <div className="mt-2 text-xs">
+                    <RatingSummary
+                      average={course.rating.average}
+                      count={course.rating.count}
+                      size="size-3.5"
+                    />
+                  </div>
+                )}
               </CardContent>
               <CardFooter>
                 <Link to={`/instructor/${course.id}`} className="w-full">
