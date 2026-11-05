@@ -1457,6 +1457,114 @@ You've completed the Building REST APIs course. You now have the skills to build
 
   console.log("Created 6 course ratings.");
 
+  // ─── Lesson Comments ───
+  // Only enrolled students, the course's own instructor (Sarah, course 1) and
+  // the admin take part. Threads are one level deep (parentId = top-level id).
+
+  const commentLesson1 = course1LessonIds[0];
+  const commentLesson2 = course1LessonIds[1];
+
+  const [thread1] = db
+    .insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[0].id,
+      parentId: null,
+      body: "Why does strict mode flag implicit any here? I thought TypeScript would just infer the type from usage.",
+      createdAt: daysAgo(6),
+    })
+    .returning()
+    .all();
+
+  db.insert(schema.lessonComments)
+    .values([
+      {
+        lessonId: commentLesson1,
+        userId: instructor1.id,
+        parentId: thread1.id,
+        body: "Great question! Inference only works when there is something to infer from. A function parameter with no annotation and no contextual type has nothing to go on, so it falls back to any.\n\nStrict mode makes that fallback an error so you notice it.",
+        createdAt: daysAgo(5),
+        editedAt: daysAgo(5),
+      },
+      {
+        lessonId: commentLesson1,
+        userId: students[1].id,
+        parentId: thread1.id,
+        body: "That cleared it up for me too, thanks!",
+        createdAt: daysAgo(4),
+      },
+    ])
+    .run();
+
+  const [thread2] = db
+    .insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[2].id,
+      parentId: null,
+      body: "The code samples in the video are a bit small on my screen. Is there a repo I can follow along with?",
+      createdAt: daysAgo(3),
+    })
+    .returning()
+    .all();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: instructor1.id,
+      parentId: thread2.id,
+      body: "Good point, I will bump up the font size in the next recording. The final code is linked under the video.",
+      createdAt: daysAgo(2),
+    })
+    .run();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson1,
+      userId: students[4].id,
+      parentId: null,
+      body: "Just started this course and already loving it.",
+      createdAt: daysAgo(1),
+    })
+    .run();
+
+  // A thread on another lesson
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson2,
+      userId: students[1].id,
+      parentId: null,
+      body: "Is it safe to enable strict mode on an existing JavaScript project all at once, or should I do it gradually?",
+      createdAt: daysAgo(7),
+    })
+    .run();
+
+  // Soft-deleted top-level comment (body blanked) that still has an admin reply
+  const [deletedThread] = db
+    .insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson2,
+      userId: students[2].id,
+      parentId: null,
+      body: "",
+      createdAt: daysAgo(8),
+      deletedAt: daysAgo(7),
+    })
+    .returning()
+    .all();
+
+  db.insert(schema.lessonComments)
+    .values({
+      lessonId: commentLesson2,
+      userId: admin.id,
+      parentId: deletedThread.id,
+      body: "Please keep the discussion on topic. Feel free to repost your question without the promotional link.",
+      createdAt: daysAgo(7),
+    })
+    .run();
+
+  console.log("Created 9 lesson comments.");
+
   // ─── Lesson Progress ───
 
   // Helper to mark lessons as complete
@@ -1790,6 +1898,7 @@ You've completed the Building REST APIs course. You now have the skills to build
   console.log("  Quizzes: 3");
   console.log("  Enrollments: 7");
   console.log("  Course ratings: 6");
+  console.log("  Lesson comments: 9");
   console.log("  Purchases: 6 (5 individual + 1 team)");
   console.log("  Teams: 1 (with 5 coupons)");
 }

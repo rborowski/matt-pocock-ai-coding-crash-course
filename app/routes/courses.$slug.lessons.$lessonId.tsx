@@ -51,10 +51,24 @@ import { renderMarkdown } from "~/lib/markdown.server";
 import { YouTubePlayer } from "~/components/youtube-player";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
-import { resolveCountry } from "~/lib/country.server";
-import { checkPppAccess, COUNTRIES } from "~/lib/ppp";
-import { findPurchase } from "~/services/purchaseService";
+import { COUNTRIES } from "~/lib/ppp";
 import { parseFormData, parseParams } from "~/lib/validation";
+import {
+  evaluatePpp,
+  getCommentAccess,
+  resolveCommentAccess,
+} from "~/services/commentAccessService";
+import {
+  countVisibleLessonComments,
+  createComment,
+  deleteComment,
+  editComment,
+  CommentError,
+  getCommentById,
+  getLessonCommentThreads,
+} from "~/services/commentService";
+import { COMMENT_MAX_LENGTH } from "~/lib/comments";
+import { LessonComments } from "~/components/lesson-comments/lesson-comments";
 
 const lessonParamsSchema = z.object({
   slug: z.string().min(1),
@@ -64,6 +78,31 @@ const lessonParamsSchema = z.object({
 const markCompleteSchema = z.object({
   intent: z.literal("mark-complete"),
 });
+
+const commentBodySchema = z
+  .string()
+  .trim()
+  .min(1, "Comment cannot be empty")
+  .max(COMMENT_MAX_LENGTH, `Comment must be at most ${COMMENT_MAX_LENGTH} characters`);
+
+const addCommentSchema = z.object({
+  intent: z.literal("add-comment"),
+  body: commentBodySchema,
+  parentId: z.coerce.number().int().positive().optional(),
+});
+
+const editCommentSchema = z.object({
+  intent: z.literal("edit-comment"),
+  commentId: z.coerce.number().int().positive(),
+  body: commentBodySchema,
+});
+
+const deleteCommentSchema = z.object({
+  intent: z.literal("delete-comment"),
+  commentId: z.coerce.number().int().positive(),
+});
+
+const COMMENT_INTENTS = ["add-comment", "edit-comment", "delete-comment"];
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.lesson?.title ?? "Lesson";
@@ -178,18 +217,26 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let pppPurchaseCountry: string | null = null;
 
   if (enrolled && currentUserId) {
-    const purchase = findPurchase(currentUserId, course.id);
-    const currentCountry = await resolveCountry(request);
-    const pppResult = checkPppAccess(
-      course.price,
-      course.pppEnabled,
-      purchase?.country ?? null,
-      currentCountry
+    const pppResult = await evaluatePpp(
+      request,
+      currentUserId,
+      course.id,
+      course
     );
     pppBlocked = pppResult.blocked;
     pppBlockedCountry = pppResult.blockedCountry;
     pppPurchaseCountry = pppResult.purchaseCountry;
   }
+
+  // Comments are only loaded for participants; others get null.
+  const { canComment, isModerator } = resolveCommentAccess(
+    currentUserId,
+    course,
+    enrolled,
+    pppBlocked
+  );
+  const commentThreads = canComment ? getLessonCommentThreads(lessonId) : null;
+  const commentCount = canComment ? countVisibleLessonComments(lessonId) : 0;
 
   // Render lesson content from Markdown to HTML server-side
   const contentHtml = lesson.content
@@ -281,6 +328,11 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
+    commentThreads,
+    commentCount,
+    canComment,
+    isCommentModerator: isModerator,
+    now: Date.now(),
   };
 }
 
@@ -299,6 +351,17 @@ export async function action({ params, request }: Route.ActionArgs) {
 
   const formData = await request.formData();
   const intent = formData.get("intent");
+
+  if (typeof intent === "string" && COMMENT_INTENTS.includes(intent)) {
+    return handleCommentIntent({
+      intent,
+      formData,
+      request,
+      course,
+      lessonId,
+      currentUserId,
+    });
+  }
 
   if (intent === "mark-complete") {
     markLessonComplete(currentUserId, lessonId);
@@ -332,6 +395,97 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   throw data("Invalid action", { status: 400 });
+}
+
+async function handleCommentIntent({
+  intent,
+  formData,
+  request,
+  course,
+  lessonId,
+  currentUserId,
+}: {
+  intent: string;
+  formData: FormData;
+  request: Request;
+  course: NonNullable<ReturnType<typeof getCourseBySlug>>;
+  lessonId: number;
+  currentUserId: number;
+}) {
+  // Course comes from the route slug only; verify the lesson belongs to it.
+  const lesson = getLessonById(lessonId);
+  const mod = lesson ? getModuleById(lesson.moduleId) : undefined;
+  if (!lesson || !mod || mod.courseId !== course.id) {
+    throw data("Lesson not found in this course", { status: 404 });
+  }
+
+  // Recompute participation server-side on every mutation. A user who lost
+  // access cannot add, edit or delete, not even their own comments.
+  const { canComment } = await getCommentAccess(
+    request,
+    currentUserId,
+    course
+  );
+  if (!canComment) {
+    return data(
+      { error: "You cannot participate in this discussion" },
+      { status: 403 }
+    );
+  }
+
+  const invalid = (errors: Record<string, string>) =>
+    data({ error: Object.values(errors)[0] ?? "Invalid input" }, { status: 400 });
+
+  const notFound = () =>
+    data({ error: "Comment not found" }, { status: 404 });
+
+  try {
+    if (intent === "add-comment") {
+      const parsed = parseFormData(formData, addCommentSchema);
+      if (!parsed.success) return invalid(parsed.errors);
+      if (parsed.data.parentId !== undefined) {
+        // Parent must live in this lesson (service checks structure).
+        const parent = getCommentById(parsed.data.parentId);
+        if (!parent || parent.lessonId !== lessonId) {
+          return notFound();
+        }
+      }
+      createComment(
+        lessonId,
+        currentUserId,
+        parsed.data.body,
+        parsed.data.parentId ?? null
+      );
+      return { success: true };
+    }
+
+    if (intent === "edit-comment") {
+      const parsed = parseFormData(formData, editCommentSchema);
+      if (!parsed.success) return invalid(parsed.errors);
+      const existing = getCommentById(parsed.data.commentId);
+      if (!existing || existing.lessonId !== lessonId) {
+        return notFound();
+      }
+      editComment(parsed.data.commentId, currentUserId, parsed.data.body);
+      return { success: true };
+    }
+
+    const parsed = parseFormData(formData, deleteCommentSchema);
+    if (!parsed.success) return invalid(parsed.errors);
+    const existing = getCommentById(parsed.data.commentId);
+    if (!existing || existing.lessonId !== lessonId) {
+      return notFound();
+    }
+    deleteComment(parsed.data.commentId, currentUserId);
+    return { success: true };
+  } catch (error) {
+    // Only expected rule violations become inline errors; anything else
+    // (e.g. database failures) propagates as a 500.
+    if (error instanceof CommentError) {
+      return data({ error: error.message }, { status: error.status });
+    }
+    throw error;
+  }
 }
 
 const AUTOPLAY_KEY = "cadence-autoplay";
@@ -382,6 +536,10 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
     pppBlocked,
     pppBlockedCountry,
     pppPurchaseCountry,
+    commentThreads,
+    commentCount,
+    isCommentModerator,
+    now,
   } = loaderData;
   const [autoplay, toggleAutoplay] = useAutoplay();
   const fetcher = useFetcher({ key: `mark-complete-${lesson.id}` });
@@ -591,6 +749,18 @@ export default function LessonViewer({ loaderData }: Route.ComponentProps) {
               )}
             </div>
           )}
+
+          {/* Discussion */}
+          <LessonComments
+            lessonId={lesson.id}
+            className="mb-8"
+            threads={commentThreads}
+            count={commentCount}
+            currentUserId={currentUserId}
+            isModerator={isCommentModerator}
+            now={now}
+            courseSlug={course.slug}
+          />
 
           {/* Prev/Next Navigation */}
           <div className="flex items-center justify-between border-t pt-6">
