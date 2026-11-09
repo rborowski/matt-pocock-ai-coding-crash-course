@@ -1,0 +1,3 @@
+interface:
+  display_name: "Adding a Route"
+  short_description: "Create, register, and typecheck a new route module"

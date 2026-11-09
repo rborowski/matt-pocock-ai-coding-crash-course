@@ -1,0 +1,3 @@
+interface:
+  display_name: "Testing Services"
+  short_description: "Write and run tests against the in-memory test db"
