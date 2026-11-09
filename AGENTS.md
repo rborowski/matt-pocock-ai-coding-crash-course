@@ -1,26 +1,4 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Overview
-
-Cadence is a full-stack course platform (a mini Udemy) used as the exercise repo for the AI Coding Crash Course. Instructors publish courses made of modules and lessons; students enrol, watch videos, track progress, take quizzes, leave comments, and rate courses. Purchasing-power parity, coupons, and team seats round out the commerce side.
-
 ## Development Commands
-
-| Command                  | What it does                                                    |
-| ------------------------ | --------------------------------------------------------------- |
-| `npm run dev`            | Dev server at http://localhost:5173                             |
-| `npm run build`          | Production build via `react-router build`                       |
-| `npm start`              | Serve the production build                                      |
-| `npm run typecheck`      | `react-router typegen` then `tsc`                               |
-| `npm test`               | Vitest, single run                                              |
-| `npm run test:watch`     | Vitest in watch mode                                            |
-| `npm run db:generate`    | Generate a Drizzle migration from `app/db/schema.ts`            |
-| `npm run db:migrate`     | Apply pending migrations to `data.db`                           |
-| `npm run db:seed`        | Drop, migrate, and reseed the database from `scripts/seed.ts`   |
-| `npm run request-logger` | Proxy that logs every request a coding agent sends to the model |
-| `npm run loc`            | Line count across tracked source files                          |
 
 Run a single test file:
 
@@ -36,16 +14,6 @@ npx vitest run app/services/courseService.test.ts -t "returns published courses"
 
 `npm run typecheck` runs `react-router typegen` first, which regenerates the per-route type modules under `.react-router/types`. Running `tsc` on its own will report missing `./+types/*` imports.
 
-Formatting is Prettier, configured in `.prettierrc` (2 spaces, double quotes, semicolons, 80 columns, ES5 trailing commas). There is no ESLint setup and no lint script.
-
-## Tech Stack
-
-- **React Router 7** in framework mode with SSR enabled (`react-router.config.ts`)
-- **TypeScript** with `~/*` aliased to `app/*`
-- **SQLite** via `better-sqlite3`, accessed through **Drizzle ORM**
-- **Tailwind CSS 4** with **shadcn/ui** (new-york style, neutral base, lucide icons)
-- **Vitest** for tests, **Zod** for validation, **marked** + **shiki** for markdown
-- **Monaco** for the instructor's markdown editor, **@hello-pangea/dnd** for drag-and-drop ordering
 
 ## Directory Structure
 
@@ -77,22 +45,11 @@ Services use positional parameters rather than options objects. This is stated a
 
 `app/routes.ts` is the route table. Routing is config-based, not file-based, so adding a page means creating the module in `app/routes/` **and** registering it in `app/routes.ts`. Most pages sit inside the `routes/layout.app.tsx` layout. Route modules import their generated types from `./+types/<route-file-name>`.
 
-Route files are named with dots for path segments and `$` for params, e.g. `courses.$slug.lessons.$lessonId.tsx`.
-
 ### Database Access
 
 `app/db/index.ts` exports `db`, a Proxy wrapping a lazily-created Drizzle instance. The connection is opened on first property access rather than at module scope, which keeps the module free of side effects so Rollup can tree-shake `better-sqlite3` out of the client bundle when a route imports a service purely for its loader. Keep this file side-effect free.
 
-`app/db/schema.ts` defines every table and enum:
-
-- **Identity** — `users` (with `UserRole`), `teams`, `teamMembers`
-- **Catalogue** — `categories`, `courses` (with `CourseStatus`), `modules`, `lessons`
-- **Learning** — `enrollments`, `lessonProgress` (with `LessonProgressStatus`), `videoWatchEvents`
-- **Assessment** — `quizzes`, `quizQuestions` (with `QuestionType`), `quizOptions`, `quizAttempts`, `quizAnswers`
-- **Commerce** — `purchases`, `coupons`
-- **Social** — `comments`, `courseRatings`
-
-Schema changes follow the `database-migrations` skill in `.agents/skills/`: edit the schema, `npm run db:generate`, update `scripts/seed.ts` for every table touched, then `npm run db:seed`. `data.db` is gitignored and disposable — delete it and reseed whenever it gets into a bad state.
+`app/db/schema.ts` defines every table and enum.
 
 ### Authentication and Access Control
 
@@ -154,19 +111,8 @@ beforeEach(() => {
 
 Moving that import above the mock makes the service capture the real database silently. Vitest runs with `globals: true` and `vite-tsconfig-paths`, so `describe`/`it`/`expect` need no import and `~/*` resolves in tests.
 
-## Course Repo Workflow
-
-This repo is the exercise project for a course. `main` is the student starting point, and lesson checkpoints live as commits on the `live-run-through` branch, each prefixed with a slug. Three `ai-hero-cli` wrappers drive it:
-
-- `npm run reset <slug>` — hard-reset to a lesson checkpoint
-- `npm run cherry-pick <slug>` — apply one lesson's commit onto current work
-- `npm run pull` — pull upstream `main` updates into the working branch
-
-These slugs are a public interface consumed by the CLI and referenced in recorded video, so renaming one breaks student navigation.
-
 ## Conventions
 
 - Service and lib modules open with a `// ─── Name ───` comment header summarising the module's responsibility; several also record the reasoning behind non-obvious decisions. Read those headers before changing a module.
 - Enums are TypeScript `enum`s exported from `app/db/schema.ts` and used at every insert site, including `scripts/seed.ts`.
 - Server-only modules use the `.server.ts` suffix.
-- `data.db` is disposable and gitignored; `scripts/seed.ts` is the source of truth for starting data.
