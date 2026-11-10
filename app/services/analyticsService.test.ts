@@ -375,6 +375,7 @@ describe("analyticsService.getInstructorAnalytics", () => {
         {
           courseId: base.course.id,
           title: base.course.title,
+          instructorName: base.instructor.name,
           grossCents: 1998,
           // Fee applied once to the course's gross: round(1998 * 0.8).
           earningsCents: 1598,
@@ -386,6 +387,7 @@ describe("analyticsService.getInstructorAnalytics", () => {
         {
           courseId: second.id,
           title: second.title,
+          instructorName: base.instructor.name,
           grossCents: 2000,
           earningsCents: 1600,
           enrollments: 1,
@@ -405,6 +407,7 @@ describe("analyticsService.getInstructorAnalytics", () => {
         {
           courseId: base.course.id,
           title: base.course.title,
+          instructorName: base.instructor.name,
           grossCents: 0,
           earningsCents: 0,
           enrollments: 0,
@@ -439,6 +442,18 @@ describe("analyticsService.getInstructorAnalytics", () => {
       expect(getInstructorAnalytics(null, "30d", NOW).courses.map((c) => c.courseId)).toEqual([
         base.course.id,
         otherCourse.id,
+      ]);
+    });
+
+    it("names each course's instructor", () => {
+      const other = createInstructor();
+      const otherCourse = createCourse(schema.CourseStatus.Published, other.id);
+
+      expect(
+        getInstructorAnalytics(null, "30d", NOW).courses.map((c) => [c.courseId, c.instructorName])
+      ).toEqual([
+        [base.course.id, base.instructor.name],
+        [otherCourse.id, other.name],
       ]);
     });
   });
@@ -478,6 +493,132 @@ describe("analyticsService.getInstructorAnalytics", () => {
       ]);
       expect(getInstructorAnalytics(null, "30d", NOW).revenueByCountry).toEqual([
         { country: "PL", grossCents: 3000 },
+      ]);
+    });
+  });
+
+  describe("top buyers", () => {
+    function teamPurchase(
+      buyerId: number,
+      courseId: number,
+      amountPaid: number,
+      createdAt: string,
+      seats: number,
+      claimed: number
+    ) {
+      const team = testDb.insert(schema.teams).values({}).returning().get();
+      const row = purchase(buyerId, courseId, amountPaid, createdAt);
+      for (let i = 0; i < seats; i++) {
+        userCounter++;
+        testDb
+          .insert(schema.coupons)
+          .values({
+            teamId: team.id,
+            courseId,
+            code: `CODE-${userCounter}`,
+            purchaseId: row.id,
+            redeemedByUserId: i < claimed ? createStudent().id : null,
+            redeemedAt: i < claimed ? daysAgo(1) : null,
+          })
+          .run();
+      }
+      return row;
+    }
+
+    it("ranks buyers by gross spent within the range, breaking ties by seats bought", () => {
+      const big = createStudent();
+      const team = createStudent();
+      const solo = createStudent();
+      purchase(big.id, base.course.id, 9000, daysAgo(2));
+      teamPurchase(team.id, base.course.id, 5000, daysAgo(3), 4, 1);
+      purchase(solo.id, base.course.id, 5000, daysAgo(4));
+      // Outside the range: would put solo on top.
+      purchase(solo.id, base.course.id, 20000, daysAgo(40));
+
+      const { topBuyers } = getInstructorAnalytics(base.instructor.id, "30d", NOW);
+
+      expect(topBuyers.map((b) => [b.userId, b.grossCents, b.seatsBought])).toEqual([
+        [big.id, 9000, 1],
+        [team.id, 5000, 4],
+        [solo.id, 5000, 1],
+      ]);
+    });
+
+    it("sums a buyer's purchases across courses with claimed and unclaimed seats", () => {
+      const second = createCourse(schema.CourseStatus.Archived);
+      const buyer = createStudent();
+      teamPurchase(buyer.id, base.course.id, 20000, daysAgo(10), 5, 2);
+      teamPurchase(buyer.id, second.id, 12000, daysAgo(3), 3, 3);
+      purchase(buyer.id, second.id, 4000, daysAgo(6));
+
+      const { topBuyers } = getInstructorAnalytics(base.instructor.id, "30d", NOW);
+
+      expect(topBuyers).toEqual([
+        {
+          userId: buyer.id,
+          name: buyer.name,
+          email: buyer.email,
+          grossCents: 36000,
+          seatsBought: 9,
+          seatsClaimed: 6,
+          seatsUnclaimed: 3,
+          // By title: "Course N" sorts before "Test Course".
+          courses: [
+            { courseId: second.id, title: second.title },
+            { courseId: base.course.id, title: base.course.title },
+          ],
+          lastPurchasedAt: daysAgo(3),
+        },
+      ]);
+    });
+
+    it("shows at most 10 buyers", () => {
+      for (let i = 1; i <= 12; i++) {
+        purchase(createStudent().id, base.course.id, i * 100, daysAgo(1));
+      }
+
+      const { topBuyers } = getInstructorAnalytics(base.instructor.id, "30d", NOW);
+
+      expect(topBuyers.map((b) => b.grossCents)).toEqual([
+        1200, 1100, 1000, 900, 800, 700, 600, 500, 400, 300,
+      ]);
+    });
+
+    function buyersAcrossInstructors() {
+      const other = createInstructor();
+      const otherCourse = createCourse(schema.CourseStatus.Published, other.id);
+      const draft = createCourse(schema.CourseStatus.Draft);
+      const mine = createStudent();
+      const theirs = createStudent();
+      const both = createStudent();
+      purchase(mine.id, base.course.id, 1000, daysAgo(1));
+      purchase(theirs.id, otherCourse.id, 3000, daysAgo(1));
+      purchase(both.id, base.course.id, 500, daysAgo(1));
+      purchase(both.id, otherCourse.id, 2000, daysAgo(1));
+      purchase(mine.id, draft.id, 9000, daysAgo(1));
+      return { mine, theirs, both };
+    }
+
+    it("shows an instructor only buyers of their own courses", () => {
+      const { mine, both } = buyersAcrossInstructors();
+
+      const { topBuyers } = getInstructorAnalytics(base.instructor.id, "30d", NOW);
+
+      expect(topBuyers.map((b) => [b.userId, b.grossCents])).toEqual([
+        [mine.id, 1000],
+        [both.id, 500],
+      ]);
+    });
+
+    it("ranks buyers across every instructor's courses when no instructor is given", () => {
+      const { mine, theirs, both } = buyersAcrossInstructors();
+
+      const { topBuyers } = getInstructorAnalytics(null, "30d", NOW);
+
+      expect(topBuyers.map((b) => [b.userId, b.grossCents])).toEqual([
+        [theirs.id, 3000],
+        [both.id, 2500],
+        [mine.id, 1000],
       ]);
     });
   });

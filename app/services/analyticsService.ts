@@ -14,6 +14,7 @@ import {
   lessons,
   modules,
   purchases,
+  users,
 } from "~/db/schema";
 
 // ─── Analytics Service ───
@@ -59,6 +60,7 @@ export type PeriodComparison = {
 export type CourseRow = {
   courseId: number;
   title: string;
+  instructorName: string;
   grossCents: number;
   earningsCents: number;
   /** Enrollments within the range — the course's cohort. */
@@ -74,6 +76,23 @@ export type CourseRow = {
 /** Gross revenue for one buyer country. A null country was not recorded. */
 export type CountryRevenue = { country: string | null; grossCents: number };
 
+/** A buyer's in-scope purchases within the range. */
+export type TopBuyer = {
+  userId: number;
+  name: string;
+  email: string;
+  grossCents: number;
+  seatsBought: number;
+  seatsClaimed: number;
+  seatsUnclaimed: number;
+  /** Distinct courses bought, by title. */
+  courses: { courseId: number; title: string }[];
+  /** ISO timestamp of the latest purchase. */
+  lastPurchasedAt: string;
+};
+
+const TOP_BUYERS_LIMIT = 10;
+
 export type InstructorAnalytics = {
   range: AnalyticsRange;
   cards: HeadlineCards;
@@ -81,6 +100,8 @@ export type InstructorAnalytics = {
   courses: CourseRow[];
   /** Largest first. */
   revenueByCountry: CountryRevenue[];
+  /** Up to TOP_BUYERS_LIMIT, by gross spent then seats bought. */
+  topBuyers: TopBuyer[];
 };
 
 const DAY_MS = 86_400_000;
@@ -173,14 +194,19 @@ function getPurchases(instructorId: number | null, window: DateWindow) {
   const rows = db
     .select({
       userId: purchases.userId,
+      buyerName: users.name,
+      buyerEmail: users.email,
       courseId: purchases.courseId,
+      courseTitle: courses.title,
       country: purchases.country,
       amountPaid: purchases.amountPaid,
+      createdAt: purchases.createdAt,
       coupons: count(coupons.id),
       redeemedCoupons: count(coupons.redeemedByUserId),
     })
     .from(purchases)
     .innerJoin(courses, eq(purchases.courseId, courses.id))
+    .innerJoin(users, eq(purchases.userId, users.id))
     .leftJoin(coupons, eq(coupons.purchaseId, purchases.id))
     .where(
       and(
@@ -239,8 +265,9 @@ function getEnrollments(instructorId: number | null, window: DateWindow) {
 /** In-scope courses, oldest first. */
 function getCourses(instructorId: number | null) {
   return db
-    .select({ id: courses.id, title: courses.title })
+    .select({ id: courses.id, title: courses.title, instructorName: users.name })
     .from(courses)
+    .innerJoin(users, eq(courses.instructorId, users.id))
     .where(courseScope(instructorId))
     .orderBy(courses.id)
     .all();
@@ -260,6 +287,7 @@ function courseRows(
     return {
       courseId: course.id,
       title: course.title,
+      instructorName: course.instructorName,
       grossCents,
       earningsCents: earningsFor(grossCents),
       enrollments: cohort.length,
@@ -277,6 +305,44 @@ function revenueByCountry(purchaseRows: ReturnType<typeof getPurchases>): Countr
   return [...totals]
     .map(([country, grossCents]) => ({ country, grossCents }))
     .sort((a, b) => b.grossCents - a.grossCents);
+}
+
+function topBuyers(purchaseRows: ReturnType<typeof getPurchases>): TopBuyer[] {
+  const buyers = new Map<number, TopBuyer>();
+  for (const p of purchaseRows) {
+    let buyer = buyers.get(p.userId);
+    if (!buyer) {
+      buyer = {
+        userId: p.userId,
+        name: p.buyerName,
+        email: p.buyerEmail,
+        grossCents: 0,
+        seatsBought: 0,
+        seatsClaimed: 0,
+        seatsUnclaimed: 0,
+        courses: [],
+        lastPurchasedAt: p.createdAt,
+      };
+      buyers.set(p.userId, buyer);
+    }
+    buyer.grossCents += p.amountPaid;
+    buyer.seatsBought += p.seats;
+    buyer.seatsClaimed += p.seatsClaimed;
+    buyer.seatsUnclaimed += p.seats - p.seatsClaimed;
+    if (!buyer.courses.some((c) => c.courseId === p.courseId)) {
+      buyer.courses.push({ courseId: p.courseId, title: p.courseTitle });
+    }
+    if (p.createdAt > buyer.lastPurchasedAt) buyer.lastPurchasedAt = p.createdAt;
+  }
+  for (const buyer of buyers.values()) {
+    buyer.courses.sort((a, b) => a.title.localeCompare(b.title));
+  }
+  return [...buyers.values()]
+    .sort(
+      (a, b) =>
+        b.grossCents - a.grossCents || b.seatsBought - a.seatsBought || a.userId - b.userId
+    )
+    .slice(0, TOP_BUYERS_LIMIT);
 }
 
 export function getInstructorAnalytics(
@@ -319,5 +385,6 @@ export function getInstructorAnalytics(
     comparison,
     courses: courseRows(instructorId, purchaseRows, enrollmentRows),
     revenueByCountry: revenueByCountry(purchaseRows),
+    topBuyers: topBuyers(purchaseRows),
   };
 }

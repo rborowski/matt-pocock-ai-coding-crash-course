@@ -1,9 +1,9 @@
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import type { Route } from "./+types/instructor";
 import { getCoursesByInstructor, getLessonCountForCourse } from "~/services/courseService";
 import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
 import { getCurrentUserId } from "~/lib/session";
-import { getUserById } from "~/services/userService";
+import { getUserById, getUsersByRole } from "~/services/userService";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import {
   getInstructorAnalytics,
@@ -14,10 +14,18 @@ import {
   type CountryRevenue,
   type CourseRow,
   type InstructorAnalytics,
+  type TopBuyer,
 } from "~/services/analyticsService";
 import { cn, formatPrice } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import {
   AlertTriangle,
   ArrowDownRight,
@@ -51,13 +59,34 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const user = getUserById(currentUserId);
 
-  if (!user || user.role !== UserRole.Instructor) {
-    throw data("Only instructors can access this page.", {
+  if (!user || (user.role !== UserRole.Instructor && user.role !== UserRole.Admin)) {
+    throw data("Only instructors and admins can access this page.", {
       status: 403,
     });
   }
 
-  const range = parseAnalyticsRange(new URL(request.url).searchParams.get("range"));
+  const searchParams = new URL(request.url).searchParams;
+  const range = parseAnalyticsRange(searchParams.get("range"));
+
+  if (user.role === UserRole.Admin) {
+    const instructors = getUsersByRole(UserRole.Instructor)
+      .map(({ id, name }) => ({ id, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    // An unknown or missing instructorId falls back to "All instructors".
+    const requestedId = Number(searchParams.get("instructorId"));
+    const selectedInstructorId = instructors.some((i) => i.id === requestedId)
+      ? requestedId
+      : null;
+    return {
+      isAdmin: true as const,
+      instructors,
+      selectedInstructorId,
+      courses: [],
+      analytics: getInstructorAnalytics(selectedInstructorId, range, new Date()),
+    };
+  }
+
+  // An instructor always sees their own courses; any instructorId is ignored.
   const analytics = getInstructorAnalytics(currentUserId, range, new Date());
 
   const instructorCourses = getCoursesByInstructor(currentUserId);
@@ -80,7 +109,13 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  return { courses: coursesWithStats, analytics };
+  return {
+    isAdmin: false as const,
+    instructors: [],
+    selectedInstructorId: null,
+    courses: coursesWithStats,
+    analytics,
+  };
 }
 
 const RANGE_LABELS: Record<AnalyticsRange, string> = {
@@ -149,7 +184,7 @@ const NUMBER_HEADER_CELL = cn(HEADER_CELL, "text-right");
 const BODY_CELL = "px-4 py-3 text-sm";
 const NUMBER_CELL = cn(BODY_CELL, "text-right");
 
-function CourseTable({ rows }: { rows: CourseRow[] }) {
+function CourseTable({ rows, showInstructor }: { rows: CourseRow[]; showInstructor: boolean }) {
   return (
     <Card className="py-0">
       <CardContent className="overflow-x-auto px-0">
@@ -157,6 +192,7 @@ function CourseTable({ rows }: { rows: CourseRow[] }) {
           <thead>
             <tr className="border-b border-border bg-muted/50">
               <th className={cn(HEADER_CELL, "text-left")}>Course</th>
+              {showInstructor && <th className={cn(HEADER_CELL, "text-left")}>Instructor</th>}
               <th className={NUMBER_HEADER_CELL}>{EARNINGS_LABEL}</th>
               <th className={NUMBER_HEADER_CELL}>Enrollments</th>
               <th className={NUMBER_HEADER_CELL}>Completion</th>
@@ -167,7 +203,7 @@ function CourseTable({ rows }: { rows: CourseRow[] }) {
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={6} className={cn(BODY_CELL, "text-center text-muted-foreground")}>
+                <td colSpan={showInstructor ? 7 : 6} className={cn(BODY_CELL, "text-center text-muted-foreground")}>
                   No published or archived courses yet.
                 </td>
               </tr>
@@ -177,6 +213,7 @@ function CourseTable({ rows }: { rows: CourseRow[] }) {
                   <td className={cn(BODY_CELL, "font-medium")}>
                     {row.title}
                   </td>
+                  {showInstructor && <td className={BODY_CELL}>{row.instructorName}</td>}
                   <td className={NUMBER_CELL}>
                     {formatMoney(row.earningsCents)}
                     <span className="block text-xs text-muted-foreground">
@@ -237,14 +274,144 @@ function RevenueByCountry({ rows }: { rows: CountryRevenue[] }) {
   );
 }
 
-function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
-  const { range, cards, comparison, courses, revenueByCountry } = analytics;
+function formatDate(iso: string) {
+  return new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function TopBuyersTable({ rows }: { rows: TopBuyer[] }) {
+  return (
+    <Card className="py-0">
+      <CardContent className="overflow-x-auto px-0">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-border bg-muted/50">
+              <th className={cn(HEADER_CELL, "text-left")}>Buyer</th>
+              <th className={NUMBER_HEADER_CELL}>Total spent</th>
+              <th className={NUMBER_HEADER_CELL}>Seats bought</th>
+              <th className={NUMBER_HEADER_CELL}>Claimed</th>
+              <th className={NUMBER_HEADER_CELL}>Unclaimed</th>
+              <th className={cn(HEADER_CELL, "text-left")}>Courses</th>
+              <th className={NUMBER_HEADER_CELL}>Last purchase</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={7} className={cn(BODY_CELL, "text-center text-muted-foreground")}>
+                  No sales in this range.
+                </td>
+              </tr>
+            ) : (
+              rows.map((row) => (
+                <tr key={row.userId} className="border-b border-border last:border-0">
+                  <td className={BODY_CELL}>
+                    <span className="block font-medium">{row.name}</span>
+                    <a
+                      href={`mailto:${row.email}`}
+                      className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+                    >
+                      {row.email}
+                    </a>
+                  </td>
+                  <td className={NUMBER_CELL}>{formatMoney(row.grossCents)}</td>
+                  <td className={NUMBER_CELL}>{row.seatsBought}</td>
+                  <td className={NUMBER_CELL}>{row.seatsClaimed}</td>
+                  <td
+                    className={cn(
+                      NUMBER_CELL,
+                      row.seatsUnclaimed > 0 && "font-medium text-amber-700 dark:text-amber-400"
+                    )}
+                  >
+                    {row.seatsUnclaimed}
+                  </td>
+                  <td className={BODY_CELL}>{row.courses.map((c) => c.title).join(", ")}</td>
+                  <td className={cn(NUMBER_CELL, "whitespace-nowrap")}>
+                    {formatDate(row.lastPurchasedAt)}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
+const ALL_INSTRUCTORS = "all";
+
+function InstructorPicker({
+  instructors,
+  selectedInstructorId,
+}: {
+  instructors: { id: number; name: string }[];
+  selectedInstructorId: number | null;
+}) {
+  const [, setSearchParams] = useSearchParams();
+  return (
+    <Select
+      value={selectedInstructorId === null ? ALL_INSTRUCTORS : String(selectedInstructorId)}
+      onValueChange={(value) =>
+        setSearchParams(
+          (params) => {
+            if (value === ALL_INSTRUCTORS) params.delete("instructorId");
+            else params.set("instructorId", value);
+            return params;
+          },
+          { preventScrollReset: true }
+        )
+      }
+    >
+      <SelectTrigger className="h-8 w-48 text-sm" aria-label="Instructor">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={ALL_INSTRUCTORS}>All instructors</SelectItem>
+        {instructors.map((i) => (
+          <SelectItem key={i.id} value={String(i.id)}>
+            {i.name}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function AnalyticsSection({
+  analytics,
+  isAdmin,
+  instructors,
+  selectedInstructorId,
+}: {
+  analytics: InstructorAnalytics;
+  isAdmin: boolean;
+  instructors: { id: number; name: string }[];
+  selectedInstructorId: number | null;
+}) {
+  const { range, cards, comparison, courses, revenueByCountry, topBuyers } = analytics;
+  const [searchParams] = useSearchParams();
+
+  function rangeHref(r: AnalyticsRange) {
+    const params = new URLSearchParams(searchParams);
+    params.set("range", r);
+    return `?${params}`;
+  }
 
   return (
     <section className="mb-10">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-xl font-semibold">Analytics</h2>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {isAdmin && (
+            <InstructorPicker
+              instructors={instructors}
+              selectedInstructorId={selectedInstructorId}
+            />
+          )}
           <Link
             to="/instructor/questions"
             className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
@@ -256,7 +423,7 @@ function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
             {ANALYTICS_RANGES.map((r) => (
               <Link
                 key={r}
-                to={`?range=${r}`}
+                to={rangeHref(r)}
                 preventScrollReset
                 aria-current={r === range ? "page" : undefined}
                 className={cn(
@@ -314,13 +481,20 @@ function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
       </div>
 
       <h3 className="mb-3 mt-8 text-lg font-semibold">Courses</h3>
-      <CourseTable rows={courses} />
+      <CourseTable rows={courses} showInstructor={isAdmin && selectedInstructorId === null} />
 
       <h3 className="mb-1 mt-8 text-lg font-semibold">Revenue by country</h3>
       <p className="mb-3 text-sm text-muted-foreground">
         Gross sales by buyer country, reflecting purchasing-power pricing
       </p>
       <RevenueByCountry rows={revenueByCountry} />
+
+      <h3 className="mb-1 mt-8 text-lg font-semibold">Top buyers</h3>
+      <p className="mb-3 text-sm text-muted-foreground">
+        Ranked by total spent in this range. Unclaimed seats are team members who haven't
+        joined yet.
+      </p>
+      <TopBuyersTable rows={topBuyers} />
     </section>
   );
 }
@@ -387,7 +561,8 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { courses, analytics } = loaderData;
+  const { isAdmin, instructors, selectedInstructorId, courses, analytics } = loaderData;
+  const title = isAdmin ? "Instructor Analytics" : "My Courses";
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -397,27 +572,36 @@ export default function InstructorDashboard({
           Home
         </Link>
         <span className="mx-2">/</span>
-        <span className="text-foreground">My Courses</span>
+        <span className="text-foreground">{title}</span>
       </nav>
 
       <div className="mb-8 flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold">My Courses</h1>
+          <h1 className="text-3xl font-bold">{title}</h1>
           <p className="mt-1 text-muted-foreground">
-            Manage your courses and track enrollments
+            {isAdmin
+              ? "Sales and engagement across instructors"
+              : "Manage your courses and track enrollments"}
           </p>
         </div>
-        <Link to="/instructor/new">
-          <Button>
-            <Plus className="mr-2 size-4" />
-            New Course
-          </Button>
-        </Link>
+        {!isAdmin && (
+          <Link to="/instructor/new">
+            <Button>
+              <Plus className="mr-2 size-4" />
+              New Course
+            </Button>
+          </Link>
+        )}
       </div>
 
-      <AnalyticsSection analytics={analytics} />
+      <AnalyticsSection
+        analytics={analytics}
+        isAdmin={isAdmin}
+        instructors={instructors}
+        selectedInstructorId={selectedInstructorId}
+      />
 
-      {courses.length === 0 ? (
+      {isAdmin ? null : courses.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <GraduationCap className="mb-4 size-12 text-muted-foreground/50" />
           <h2 className="text-lg font-medium">No courses yet</h2>
