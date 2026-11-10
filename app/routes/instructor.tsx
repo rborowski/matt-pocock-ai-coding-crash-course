@@ -11,6 +11,8 @@ import {
   ANALYTICS_RANGES,
   PLATFORM_FEE_RATE,
   type AnalyticsRange,
+  type CountryRevenue,
+  type CourseRow,
   type InstructorAnalytics,
 } from "~/services/analyticsService";
 import { cn, formatPrice } from "~/lib/utils";
@@ -24,6 +26,7 @@ import {
   GraduationCap,
   MessageCircleQuestion,
   Plus,
+  Star,
   Users,
 } from "lucide-react";
 import { CourseImage } from "~/components/course-image";
@@ -141,8 +144,101 @@ function StatCard({
   );
 }
 
+const HEADER_CELL = "px-4 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground";
+const NUMBER_HEADER_CELL = cn(HEADER_CELL, "text-right");
+const BODY_CELL = "px-4 py-3 text-sm";
+const NUMBER_CELL = cn(BODY_CELL, "text-right");
+
+function CourseTable({ rows }: { rows: CourseRow[] }) {
+  return (
+    <Card className="py-0">
+      <CardContent className="overflow-x-auto px-0">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-border bg-muted/50">
+              <th className={cn(HEADER_CELL, "text-left")}>Course</th>
+              <th className={NUMBER_HEADER_CELL}>{EARNINGS_LABEL}</th>
+              <th className={NUMBER_HEADER_CELL}>Enrollments</th>
+              <th className={NUMBER_HEADER_CELL}>Completion</th>
+              <th className={NUMBER_HEADER_CELL}>Avg progress</th>
+              <th className={NUMBER_HEADER_CELL}>Rating (all time)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={6} className={cn(BODY_CELL, "text-center text-muted-foreground")}>
+                  No published or archived courses yet.
+                </td>
+              </tr>
+            ) : (
+              rows.map((row) => (
+                <tr key={row.courseId} className="border-b border-border last:border-0">
+                  <td className={cn(BODY_CELL, "font-medium")}>
+                    {row.title}
+                  </td>
+                  <td className={NUMBER_CELL}>
+                    {formatMoney(row.earningsCents)}
+                    <span className="block text-xs text-muted-foreground">
+                      of {formatMoney(row.grossCents)}
+                    </span>
+                  </td>
+                  <td className={NUMBER_CELL}>{row.enrollments}</td>
+                  <td className={NUMBER_CELL}>
+                    {formatPercent(row.strictCompletionRate)}
+                  </td>
+                  <td className={NUMBER_CELL}>{formatPercent(row.averageProgress)}</td>
+                  <td className={NUMBER_CELL}>
+                    {row.rating.average === null ? (
+                      <span className="text-muted-foreground">No ratings</span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1">
+                        <Star className="size-3.5 fill-yellow-400 text-yellow-400" />
+                        {row.rating.average.toFixed(1)}
+                        <span className="text-xs text-muted-foreground">({row.rating.count})</span>
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RevenueByCountry({ rows }: { rows: CountryRevenue[] }) {
+  const maxGrossCents = Math.max(0, ...rows.map((r) => r.grossCents));
+  return (
+    <Card className="gap-3 py-4">
+      <CardContent className="px-4">
+        {rows.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No sales in this range.</p>
+        ) : (
+          <ul className="space-y-2">
+            {rows.map((row) => (
+              <li key={row.country ?? "unknown"} className="grid grid-cols-[5rem_1fr_6rem] items-center gap-3 text-sm">
+                <span>{row.country ?? "Unknown"}</span>
+                <div className="h-2 rounded-full bg-muted">
+                  <div
+                    className="h-2 rounded-full bg-primary"
+                    style={{ width: `${maxGrossCents === 0 ? 0 : (row.grossCents / maxGrossCents) * 100}%` }}
+                  />
+                </div>
+                <span className="text-right tabular-nums">{formatMoney(row.grossCents)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
-  const { range, cards, comparison } = analytics;
+  const { range, cards, comparison, courses, revenueByCountry } = analytics;
 
   return (
     <section className="mb-10">
@@ -216,6 +312,15 @@ function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
           </p>
         </StatCard>
       </div>
+
+      <h3 className="mb-3 mt-8 text-lg font-semibold">Courses</h3>
+      <CourseTable rows={courses} />
+
+      <h3 className="mb-1 mt-8 text-lg font-semibold">Revenue by country</h3>
+      <p className="mb-3 text-sm text-muted-foreground">
+        Gross sales by buyer country, reflecting purchasing-power pricing
+      </p>
+      <RevenueByCountry rows={revenueByCountry} />
     </section>
   );
 }

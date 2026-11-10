@@ -1,6 +1,10 @@
 import { and, count, eq, gt, gte, isNotNull, lt, lte, ne, sql, type SQL } from "drizzle-orm";
 import { db } from "~/db";
 import {
+  getCourseRatingSummaries,
+  type CourseRatingSummary,
+} from "~/services/courseRatingService";
+import {
   coupons,
   courses,
   CourseStatus,
@@ -51,10 +55,32 @@ export type PeriodComparison = {
   studentsChangePct: number | null;
 };
 
+/** One in-scope course's figures within the range. */
+export type CourseRow = {
+  courseId: number;
+  title: string;
+  grossCents: number;
+  earningsCents: number;
+  /** Enrollments within the range — the course's cohort. */
+  enrollments: number;
+  /** Null if the course's cohort is empty. */
+  strictCompletionRate: number | null;
+  /** Null if the course's cohort is empty. */
+  averageProgress: number | null;
+  /** All-time rating summary. */
+  rating: CourseRatingSummary;
+};
+
+/** Gross revenue for one buyer country. A null country was not recorded. */
+export type CountryRevenue = { country: string | null; grossCents: number };
+
 export type InstructorAnalytics = {
   range: AnalyticsRange;
   cards: HeadlineCards;
   comparison: PeriodComparison | null;
+  courses: CourseRow[];
+  /** Largest first. */
+  revenueByCountry: CountryRevenue[];
 };
 
 const DAY_MS = 86_400_000;
@@ -147,6 +173,8 @@ function getPurchases(instructorId: number | null, window: DateWindow) {
   const rows = db
     .select({
       userId: purchases.userId,
+      courseId: purchases.courseId,
+      country: purchases.country,
       amountPaid: purchases.amountPaid,
       coupons: count(coupons.id),
       redeemedCoupons: count(coupons.redeemedByUserId),
@@ -197,6 +225,7 @@ function getEnrollments(instructorId: number | null, window: DateWindow) {
 
   return db
     .select({
+      courseId: enrollments.courseId,
       completed: sql<boolean>`${isNotNull(enrollments.completedAt)}`.mapWith(Boolean),
       totalLessons: sql<number>`(${totalLessons})`.mapWith(Number),
       completedLessons: sql<number>`(${completedLessons})`.mapWith(Number),
@@ -205,6 +234,49 @@ function getEnrollments(instructorId: number | null, window: DateWindow) {
     .innerJoin(courses, eq(enrollments.courseId, courses.id))
     .where(and(courseScope(instructorId), withinWindow(enrollments.enrolledAt, window)))
     .all();
+}
+
+/** In-scope courses, oldest first. */
+function getCourses(instructorId: number | null) {
+  return db
+    .select({ id: courses.id, title: courses.title })
+    .from(courses)
+    .where(courseScope(instructorId))
+    .orderBy(courses.id)
+    .all();
+}
+
+function courseRows(
+  instructorId: number | null,
+  purchaseRows: ReturnType<typeof getPurchases>,
+  enrollmentRows: ReturnType<typeof getEnrollments>
+): CourseRow[] {
+  const scoped = getCourses(instructorId);
+  const ratings = getCourseRatingSummaries(scoped.map((c) => c.id));
+
+  return scoped.map((course) => {
+    const grossCents = sumGross(purchaseRows.filter((p) => p.courseId === course.id));
+    const cohort = enrollmentRows.filter((e) => e.courseId === course.id);
+    return {
+      courseId: course.id,
+      title: course.title,
+      grossCents,
+      earningsCents: earningsFor(grossCents),
+      enrollments: cohort.length,
+      ...completionMetrics(cohort),
+      rating: ratings.get(course.id)!,
+    };
+  });
+}
+
+function revenueByCountry(purchaseRows: ReturnType<typeof getPurchases>): CountryRevenue[] {
+  const totals = new Map<string | null, number>();
+  for (const p of purchaseRows) {
+    totals.set(p.country, (totals.get(p.country) ?? 0) + p.amountPaid);
+  }
+  return [...totals]
+    .map(([country, grossCents]) => ({ country, grossCents }))
+    .sort((a, b) => b.grossCents - a.grossCents);
 }
 
 export function getInstructorAnalytics(
@@ -245,5 +317,7 @@ export function getInstructorAnalytics(
       ...completionMetrics(enrollmentRows),
     },
     comparison,
+    courses: courseRows(instructorId, purchaseRows, enrollmentRows),
+    revenueByCountry: revenueByCountry(purchaseRows),
   };
 }

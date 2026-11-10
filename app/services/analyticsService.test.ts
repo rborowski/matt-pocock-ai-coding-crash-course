@@ -35,6 +35,19 @@ function createStudent() {
     .get();
 }
 
+function createInstructor() {
+  userCounter++;
+  return testDb
+    .insert(schema.users)
+    .values({
+      name: `Instructor ${userCounter}`,
+      email: `instructor${userCounter}@example.com`,
+      role: schema.UserRole.Instructor,
+    })
+    .returning()
+    .get();
+}
+
 function createCourse(status: schema.CourseStatus, instructorId = base.instructor.id) {
   userCounter++;
   return testDb
@@ -52,10 +65,16 @@ function createCourse(status: schema.CourseStatus, instructorId = base.instructo
     .get();
 }
 
-function purchase(userId: number, courseId: number, amountPaid: number, createdAt: string) {
+function purchase(
+  userId: number,
+  courseId: number,
+  amountPaid: number,
+  createdAt: string,
+  country: string | null = "US"
+) {
   return testDb
     .insert(schema.purchases)
-    .values({ userId, courseId, amountPaid, country: "US", createdAt })
+    .values({ userId, courseId, amountPaid, country, createdAt })
     .returning()
     .get();
 }
@@ -71,6 +90,36 @@ function enroll(
     .values({ userId, courseId, enrolledAt, completedAt })
     .returning()
     .get();
+}
+
+function addLessons(courseId: number, count: number) {
+  const module = testDb
+    .insert(schema.modules)
+    .values({ courseId, title: "Module", position: 1 })
+    .returning()
+    .get();
+  return Array.from({ length: count }, (_, i) =>
+    testDb
+      .insert(schema.lessons)
+      .values({ moduleId: module.id, title: `Lesson ${i + 1}`, position: i + 1 })
+      .returning()
+      .get()
+  );
+}
+
+function progress(
+  userId: number,
+  lessonId: number,
+  status = schema.LessonProgressStatus.Completed
+) {
+  testDb
+    .insert(schema.lessonProgress)
+    .values({ userId, lessonId, status, completedAt: daysAgo(1) })
+    .run();
+}
+
+function rate(userId: number, courseId: number, rating: number) {
+  testDb.insert(schema.courseRatings).values({ userId, courseId, rating }).run();
 }
 
 describe("analyticsService.getInstructorAnalytics", () => {
@@ -239,11 +288,7 @@ describe("analyticsService.getInstructorAnalytics", () => {
   });
 
   it("covers only the given instructor's courses, or every instructor's when null", () => {
-    const other = testDb
-      .insert(schema.users)
-      .values({ name: "Other", email: "other@example.com", role: schema.UserRole.Instructor })
-      .returning()
-      .get();
+    const other = createInstructor();
     const otherCourse = createCourse(schema.CourseStatus.Published, other.id);
     purchase(createStudent().id, base.course.id, 1000, daysAgo(1));
     purchase(createStudent().id, otherCourse.id, 2000, daysAgo(1));
@@ -253,32 +298,6 @@ describe("analyticsService.getInstructorAnalytics", () => {
   });
 
   describe("completion", () => {
-    function addLessons(courseId: number, count: number) {
-      const mod = testDb
-        .insert(schema.modules)
-        .values({ courseId, title: "Module", position: 1 })
-        .returning()
-        .get();
-      return Array.from({ length: count }, (_, i) =>
-        testDb
-          .insert(schema.lessons)
-          .values({ moduleId: mod.id, title: `Lesson ${i + 1}`, position: i + 1 })
-          .returning()
-          .get()
-      );
-    }
-
-    function progress(
-      userId: number,
-      lessonId: number,
-      status = schema.LessonProgressStatus.Completed
-    ) {
-      testDb
-        .insert(schema.lessonProgress)
-        .values({ userId, lessonId, status, completedAt: daysAgo(1) })
-        .run();
-    }
-
     it("measures the cohort who enrolled within the range on their progress today", () => {
       const lessons = addLessons(base.course.id, 4);
       const secondCourse = createCourse(schema.CourseStatus.Published);
@@ -320,6 +339,146 @@ describe("analyticsService.getInstructorAnalytics", () => {
 
       expect(cards.strictCompletionRate).toBeNull();
       expect(cards.averageProgress).toBeNull();
+    });
+  });
+
+  describe("course rows", () => {
+    it("reports earnings, enrollments, completion and rating per course within the range", () => {
+      const lessons = addLessons(base.course.id, 2);
+      const second = createCourse(schema.CourseStatus.Published);
+
+      const finisher = createStudent();
+      purchase(finisher.id, base.course.id, 999, daysAgo(3));
+      enroll(finisher.id, base.course.id, daysAgo(3), daysAgo(1));
+      lessons.forEach((l) => progress(finisher.id, l.id));
+
+      const starter = createStudent();
+      purchase(starter.id, base.course.id, 999, daysAgo(5));
+      enroll(starter.id, base.course.id, daysAgo(5));
+
+      // Outside the 30d range: no revenue or enrollment for the row.
+      const veteran = createStudent();
+      purchase(veteran.id, base.course.id, 5000, daysAgo(100));
+      enroll(veteran.id, base.course.id, daysAgo(100));
+
+      const secondBuyer = createStudent();
+      purchase(secondBuyer.id, second.id, 2000, daysAgo(1));
+      enroll(secondBuyer.id, second.id, daysAgo(1));
+
+      rate(finisher.id, base.course.id, 5);
+      rate(starter.id, base.course.id, 4);
+      rate(veteran.id, base.course.id, 4);
+
+      const { courses } = getInstructorAnalytics(base.instructor.id, "30d", NOW);
+
+      expect(courses).toEqual([
+        {
+          courseId: base.course.id,
+          title: base.course.title,
+          grossCents: 1998,
+          // Fee applied once to the course's gross: round(1998 * 0.8).
+          earningsCents: 1598,
+          enrollments: 2,
+          strictCompletionRate: 0.5,
+          averageProgress: 0.5,
+          rating: { average: 4.3, count: 3 },
+        },
+        {
+          courseId: second.id,
+          title: second.title,
+          grossCents: 2000,
+          earningsCents: 1600,
+          enrollments: 1,
+          strictCompletionRate: 0,
+          averageProgress: 0,
+          rating: { average: null, count: 0 },
+        },
+      ]);
+    });
+
+    it("shows a course with no enrollments in the range without dividing by zero", () => {
+      addLessons(base.course.id, 3);
+
+      const { courses } = getInstructorAnalytics(base.instructor.id, "30d", NOW);
+
+      expect(courses).toEqual([
+        {
+          courseId: base.course.id,
+          title: base.course.title,
+          grossCents: 0,
+          earningsCents: 0,
+          enrollments: 0,
+          strictCompletionRate: null,
+          averageProgress: null,
+          rating: { average: null, count: 0 },
+        },
+      ]);
+    });
+
+    it("lists archived courses and leaves out drafts", () => {
+      const draft = createCourse(schema.CourseStatus.Draft);
+      const archived = createCourse(schema.CourseStatus.Archived);
+      purchase(createStudent().id, draft.id, 7000, daysAgo(3));
+      purchase(createStudent().id, archived.id, 4000, daysAgo(3));
+
+      const { courses } = getInstructorAnalytics(base.instructor.id, "30d", NOW);
+
+      expect(courses.map((c) => [c.courseId, c.grossCents])).toEqual([
+        [base.course.id, 0],
+        [archived.id, 4000],
+      ]);
+    });
+
+    it("lists only the given instructor's courses, or every instructor's when null", () => {
+      const other = createInstructor();
+      const otherCourse = createCourse(schema.CourseStatus.Published, other.id);
+
+      expect(
+        getInstructorAnalytics(base.instructor.id, "30d", NOW).courses.map((c) => c.courseId)
+      ).toEqual([base.course.id]);
+      expect(getInstructorAnalytics(null, "30d", NOW).courses.map((c) => c.courseId)).toEqual([
+        base.course.id,
+        otherCourse.id,
+      ]);
+    });
+  });
+
+  describe("revenue by country", () => {
+    it("groups gross revenue by the purchase's country within the range, largest first", () => {
+      purchase(createStudent().id, base.course.id, 1000, daysAgo(1), "US");
+      purchase(createStudent().id, base.course.id, 1500, daysAgo(2), "US");
+      purchase(createStudent().id, base.course.id, 4000, daysAgo(3), "DE");
+      purchase(createStudent().id, base.course.id, 300, daysAgo(4), "IN");
+      purchase(createStudent().id, base.course.id, 200, daysAgo(5), null);
+      // Outside the range.
+      purchase(createStudent().id, base.course.id, 9000, daysAgo(31), "IN");
+      // Free enrollment: no revenue.
+      purchase(createStudent().id, base.course.id, 0, daysAgo(1), "BR");
+
+      const { revenueByCountry } = getInstructorAnalytics(base.instructor.id, "30d", NOW);
+
+      expect(revenueByCountry).toEqual([
+        { country: "DE", grossCents: 4000 },
+        { country: "US", grossCents: 2500 },
+        { country: "IN", grossCents: 300 },
+        { country: null, grossCents: 200 },
+      ]);
+    });
+
+    it("leaves out other instructors' and draft courses", () => {
+      const other = createInstructor();
+      const otherCourse = createCourse(schema.CourseStatus.Published, other.id);
+      const draft = createCourse(schema.CourseStatus.Draft);
+      purchase(createStudent().id, base.course.id, 1000, daysAgo(1), "PL");
+      purchase(createStudent().id, otherCourse.id, 2000, daysAgo(1), "PL");
+      purchase(createStudent().id, draft.id, 3000, daysAgo(1), "FR");
+
+      expect(getInstructorAnalytics(base.instructor.id, "30d", NOW).revenueByCountry).toEqual([
+        { country: "PL", grossCents: 1000 },
+      ]);
+      expect(getInstructorAnalytics(null, "30d", NOW).revenueByCountry).toEqual([
+        { country: "PL", grossCents: 3000 },
+      ]);
     });
   });
 
