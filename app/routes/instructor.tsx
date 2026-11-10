@@ -5,9 +5,27 @@ import { getEnrollmentCountForCourse } from "~/services/enrollmentService";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
+import {
+  getInstructorAnalytics,
+  parseAnalyticsRange,
+  ANALYTICS_RANGES,
+  PLATFORM_FEE_RATE,
+  type AnalyticsRange,
+  type InstructorAnalytics,
+} from "~/services/analyticsService";
+import { cn, formatPrice } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
-import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
+  BookOpen,
+  GraduationCap,
+  MessageCircleQuestion,
+  Plus,
+  Users,
+} from "lucide-react";
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
@@ -36,6 +54,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     });
   }
 
+  const range = parseAnalyticsRange(new URL(request.url).searchParams.get("range"));
+  const analytics = getInstructorAnalytics(currentUserId, range, new Date());
+
   const instructorCourses = getCoursesByInstructor(currentUserId);
 
   const coursesWithStats = instructorCourses.map((course) => {
@@ -56,7 +77,147 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  return { courses: coursesWithStats };
+  return { courses: coursesWithStats, analytics };
+}
+
+const RANGE_LABELS: Record<AnalyticsRange, string> = {
+  "30d": "Last 30 days",
+  "90d": "Last 90 days",
+  all: "All time",
+};
+
+const EARNINGS_LABEL = `Your earnings (${Math.round((1 - PLATFORM_FEE_RATE) * 100)}%)`;
+
+/** formatPrice renders 0 as "Free", which reads wrongly for revenue. */
+function formatMoney(cents: number) {
+  return cents === 0 ? "$0.00" : formatPrice(cents);
+}
+
+function formatPercent(fraction: number | null) {
+  return fraction === null ? "—" : `${Math.round(fraction * 100)}%`;
+}
+
+function ChangeBadge({ changePct, previous }: { changePct: number | null; previous: string }) {
+  if (changePct === null) {
+    return (
+      <p className="mt-1 text-xs text-muted-foreground">
+        No activity in the previous period
+      </p>
+    );
+  }
+  const up = changePct >= 0;
+  const Arrow = up ? ArrowUpRight : ArrowDownRight;
+  return (
+    <p
+      className={cn(
+        "mt-1 flex items-center gap-1 text-xs",
+        up ? "text-green-700 dark:text-green-400" : "text-red-700 dark:text-red-400"
+      )}
+    >
+      <Arrow className="size-3" />
+      {up ? "+" : ""}
+      {changePct}% vs previous period ({previous})
+    </p>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  children,
+}: {
+  label: string;
+  value: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <Card className="gap-2 py-4">
+      <CardContent className="px-4">
+        <p className="text-sm text-muted-foreground">{label}</p>
+        <p className="mt-1 text-2xl font-bold">{value}</p>
+        {children}
+      </CardContent>
+    </Card>
+  );
+}
+
+function AnalyticsSection({ analytics }: { analytics: InstructorAnalytics }) {
+  const { range, cards, comparison } = analytics;
+
+  return (
+    <section className="mb-10">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold">Analytics</h2>
+        <div className="flex items-center gap-3">
+          <Link
+            to="/instructor/questions"
+            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <MessageCircleQuestion className="size-4" />
+            Student questions
+          </Link>
+          <nav aria-label="Time range" className="inline-flex rounded-md border p-0.5">
+            {ANALYTICS_RANGES.map((r) => (
+              <Link
+                key={r}
+                to={`?range=${r}`}
+                preventScrollReset
+                aria-current={r === range ? "page" : undefined}
+                className={cn(
+                  "rounded px-3 py-1 text-sm",
+                  r === range
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {RANGE_LABELS[r]}
+              </Link>
+            ))}
+          </nav>
+        </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <StatCard label={EARNINGS_LABEL} value={formatMoney(cards.earningsCents)}>
+          <p className="text-xs text-muted-foreground">
+            Gross sales {formatMoney(cards.grossCents)}
+          </p>
+          {comparison && (
+            <ChangeBadge
+              changePct={comparison.revenueChangePct}
+              previous={formatMoney(comparison.previousEarningsCents)}
+            />
+          )}
+        </StatCard>
+        <StatCard label="Students" value={String(cards.students)}>
+          {comparison && (
+            <ChangeBadge
+              changePct={comparison.studentsChangePct}
+              previous={String(comparison.previousStudents)}
+            />
+          )}
+        </StatCard>
+        <StatCard label="Buyers" value={String(cards.buyers)} />
+        <StatCard
+          label="Seats sold / claimed"
+          value={`${cards.seatsSold} / ${cards.seatsClaimed}`}
+        />
+        <StatCard
+          label="Strict completion rate"
+          value={formatPercent(cards.strictCompletionRate)}
+        >
+          <p className="text-xs text-muted-foreground">
+            Students who enrolled in this range and finished
+          </p>
+        </StatCard>
+        <StatCard label="Average progress" value={formatPercent(cards.averageProgress)}>
+          <p className="text-xs text-muted-foreground">
+            Lessons completed per student, as a share of the course
+          </p>
+        </StatCard>
+      </div>
+    </section>
+  );
 }
 
 function statusBadge(status: string) {
@@ -121,7 +282,7 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { courses } = loaderData;
+  const { courses, analytics } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -148,6 +309,8 @@ export default function InstructorDashboard({
           </Button>
         </Link>
       </div>
+
+      <AnalyticsSection analytics={analytics} />
 
       {courses.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
