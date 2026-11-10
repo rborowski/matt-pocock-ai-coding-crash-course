@@ -5,6 +5,7 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "path";
 import { fileURLToPath } from "url";
 import * as schema from "../app/db/schema";
+import { calculatePppPrice } from "../app/lib/ppp";
 import {
   UserRole,
   CourseStatus,
@@ -233,7 +234,7 @@ By the end of this course, you'll understand why TypeScript has become the defau
       status: CourseStatus.Published,
       coverImageUrl: "/images/course-typescript.svg",
       price: 4999,
-      createdAt: daysAgo(90),
+      createdAt: daysAgo(400),
       updatedAt: daysAgo(10),
     })
     .returning()
@@ -614,7 +615,7 @@ Practice by converting an existing JavaScript project to TypeScript. Start with 
         courseId: course1.id,
         title: modData.title,
         position: mi + 1,
-        createdAt: daysAgo(90 - mi),
+        createdAt: daysAgo(400 - mi),
       })
       .returning()
       .all();
@@ -633,7 +634,7 @@ Practice by converting an existing JavaScript project to TypeScript. Start with 
             null,
           position: li + 1,
           durationMinutes: lessonData.duration,
-          createdAt: daysAgo(90 - mi),
+          createdAt: daysAgo(400 - mi),
         })
         .returning()
         .all();
@@ -694,7 +695,7 @@ Every lesson is focused and practical. No 45-minute lectures where 40 minutes ar
       status: CourseStatus.Published,
       coverImageUrl: "/images/course-nodejs.svg",
       price: 5999,
-      createdAt: daysAgo(75),
+      createdAt: daysAgo(330),
       updatedAt: daysAgo(5),
     })
     .returning()
@@ -1115,7 +1116,7 @@ You've completed the Building REST APIs course. You now have the skills to build
         courseId: course2.id,
         title: modData.title,
         position: mi + 1,
-        createdAt: daysAgo(75 - mi),
+        createdAt: daysAgo(330 - mi),
       })
       .returning()
       .all();
@@ -1134,7 +1135,7 @@ You've completed the Building REST APIs course. You now have the skills to build
             null,
           position: li + 1,
           durationMinutes: lessonData.duration,
-          createdAt: daysAgo(75 - mi),
+          createdAt: daysAgo(330 - mi),
         })
         .returning()
         .all();
@@ -1913,18 +1914,296 @@ You've completed the Building REST APIs course. You now have the skills to build
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (2 redeemed, 3 available).`
   );
 
+  // ─── Analytics Demo Data ───
+  // Generated activity so the instructor dashboards have something to show:
+  // about a year of sales across PPP countries, team purchases with unclaimed
+  // seats, a lesson drop-off funnel with a visible cliff, students who bought
+  // both courses, an archived course with past sales and a draft course whose
+  // test purchases must stay out of the roll-up. A fixed PRNG seed makes every
+  // reseed produce the same figures.
+
+  let rngState = 20261110;
+  function rand() {
+    // mulberry32
+    rngState = (rngState + 0x6d2b79f5) | 0;
+    let t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  function pick<T>(items: readonly T[]): T {
+    return items[Math.floor(rand() * items.length)];
+  }
+  /** A day offset within [0, span), skewed towards today so sales grow over time. */
+  function recentDay(span: number, min = 0) {
+    return min + Math.floor(Math.pow(rand(), 1.6) * (span - min));
+  }
+
+  const DEMO_COUNTRIES: [string, number][] = [
+    ["US", 30], ["GB", 8], ["DE", 8], ["CA", 5], ["AU", 3], ["FR", 4],
+    ["PL", 6], ["BR", 7], ["MX", 4], ["IN", 13], ["PH", 4], ["NG", 4], ["KE", 2],
+  ];
+  const countryWeightTotal = DEMO_COUNTRIES.reduce((sum, [, w]) => sum + w, 0);
+  function pickCountry() {
+    let r = rand() * countryWeightTotal;
+    for (const [code, weight] of DEMO_COUNTRIES) {
+      r -= weight;
+      if (r < 0) return code;
+    }
+    return "US";
+  }
+
+  const FIRST_NAMES = [
+    "Ava", "Noah", "Mia", "Lucas", "Zoe", "Ethan", "Isla", "Mateo", "Chloe", "Arjun",
+    "Priya", "Kenji", "Amara", "Diego", "Freya", "Omar", "Lena", "Tomasz", "Ines", "Kofi",
+    "Hana", "Rafael", "Nadia", "Felix", "Aisha", "Jonas", "Lucia", "Ravi", "Maya", "Leo",
+  ];
+  const LAST_NAMES = [
+    "Nguyen", "Garcia", "Kowalski", "Okafor", "Silva", "Schmidt", "Patel", "Tanaka",
+    "Rossi", "Dubois", "Kim", "Mensah", "Novak", "Haddad", "Larsen", "Reyes", "Iyer", "Fischer",
+  ];
+
+  let demoStudentCount = 0;
+  function createDemoStudent(joinedDaysAgo: number) {
+    demoStudentCount++;
+    const first = pick(FIRST_NAMES);
+    const last = pick(LAST_NAMES);
+    const [user] = db
+      .insert(schema.users)
+      .values({
+        name: `${first} ${last}`,
+        email: `${first}.${last}.${demoStudentCount}@demo.dev`.toLowerCase(),
+        role: UserRole.Student,
+        avatarUrl: `https://api.dicebear.com/9.x/avataaars/svg?seed=demo${demoStudentCount}`,
+        createdAt: daysAgo(joinedDaysAgo + 1),
+      })
+      .returning()
+      .all();
+    return user;
+  }
+
+  // Extra courses: an archived one with older sales (counts in the roll-up)
+  // and a draft one (left out of the roll-up even though it has purchases).
+  function createDemoCourse(
+    title: string,
+    status: CourseStatus,
+    price: number,
+    createdDaysAgo: number,
+    moduleLessons: [string, string[]][]
+  ) {
+    const [course] = db
+      .insert(schema.courses)
+      .values({
+        title,
+        slug: slugify(title),
+        description: `${title}, a demo course for the analytics dashboards.`,
+        salesCopy: `## ${title}\n\nDemo course.`,
+        instructorId: instructor1.id,
+        categoryId: catBySlug["programming"].id,
+        status,
+        price,
+        createdAt: daysAgo(createdDaysAgo),
+        updatedAt: daysAgo(createdDaysAgo),
+      })
+      .returning()
+      .all();
+    const lessonIds: number[] = [];
+    moduleLessons.forEach(([moduleTitle, lessonTitles], mi) => {
+      const [mod] = db
+        .insert(schema.modules)
+        .values({ courseId: course.id, title: moduleTitle, position: mi + 1 })
+        .returning()
+        .all();
+      lessonTitles.forEach((lessonTitle, li) => {
+        const [lesson] = db
+          .insert(schema.lessons)
+          .values({ moduleId: mod.id, title: lessonTitle, position: li + 1, durationMinutes: 10 })
+          .returning()
+          .all();
+        lessonIds.push(lesson.id);
+      });
+    });
+    return { course, lessonIds };
+  }
+
+  const archived = createDemoCourse(
+    "JavaScript Essentials (2024 Edition)",
+    CourseStatus.Archived,
+    2999,
+    700,
+    [
+      ["Language Basics", ["Variables and Types", "Functions", "Objects and Arrays"]],
+      ["The Runtime", ["The Event Loop", "Promises", "Async and Await"]],
+    ]
+  );
+  const draft = createDemoCourse("Effect in Practice", CourseStatus.Draft, 7999, 20, [
+    ["Getting Started", ["Why Effect", "Your First Effect", "Error Handling"]],
+  ]);
+
+  // Lesson progress for one enrollment. Students work through lessons in
+  // order, about one every day and a half, so recent enrollments haven't
+  // reached the later lessons yet. Each lesson loses a few students, and the
+  // cliff lesson loses many more: that is the funnel's biggest drop.
+  function demoProgress(
+    userId: number,
+    lessonIds: number[],
+    enrolledDaysAgo: number,
+    cliffIndex: number
+  ) {
+    const reachable = Math.min(lessonIds.length, Math.floor(enrolledDaysAgo / 1.5) + 1);
+    let done = 0;
+    while (done < reachable) {
+      const keepGoing = done === cliffIndex ? 0.55 : 0.95;
+      if (rand() > keepGoing) break;
+      const completedDaysAgo = Math.max(0, enrolledDaysAgo - Math.round(done * 1.5));
+      db.insert(schema.lessonProgress)
+        .values({
+          userId,
+          lessonId: lessonIds[done],
+          status: LessonProgressStatus.Completed,
+          completedAt: daysAgo(completedDaysAgo),
+        })
+        .run();
+      done++;
+    }
+    if (done < lessonIds.length && done > 0 && rand() < 0.5) {
+      db.insert(schema.lessonProgress)
+        .values({ userId, lessonId: lessonIds[done], status: LessonProgressStatus.InProgress })
+        .run();
+    }
+    return done === lessonIds.length
+      ? daysAgo(Math.max(0, enrolledDaysAgo - Math.round(lessonIds.length * 1.5)))
+      : null;
+  }
+
+  function demoEnroll(
+    userId: number,
+    courseId: number,
+    lessonIds: number[],
+    enrolledDaysAgo: number,
+    cliffIndex: number
+  ) {
+    const completedAt = demoProgress(userId, lessonIds, enrolledDaysAgo, cliffIndex);
+    db.insert(schema.enrollments)
+      .values({ userId, courseId, enrolledAt: daysAgo(enrolledDaysAgo), completedAt })
+      .run();
+  }
+
+  let demoPurchaseCount = 0;
+  function demoPurchase(
+    userId: number,
+    courseId: number,
+    price: number,
+    country: string,
+    boughtDaysAgo: number,
+    seats = 1
+  ) {
+    demoPurchaseCount++;
+    const [row] = db
+      .insert(schema.purchases)
+      .values({
+        userId,
+        courseId,
+        amountPaid: calculatePppPrice(price, country) * seats,
+        country,
+        createdAt: daysAgo(boughtDaysAgo),
+      })
+      .returning()
+      .all();
+    return row;
+  }
+
+  // The cliffs: course 1 at "Generics Basics", course 2 at the first lesson of
+  // its third module, the archived course at "The Event Loop".
+  const demoCourses = [
+    { course: course1, lessonIds: course1LessonIds, buyers: 140, span: 380, cliff: 8 },
+    { course: course2, lessonIds: course2LessonIds, buyers: 100, span: 320, cliff: 8 },
+    { course: archived.course, lessonIds: archived.lessonIds, buyers: 45, span: 680, minDay: 150, cliff: 3 },
+  ];
+
+  let demoEnrollmentCount = 0;
+  const course1Buyers: { id: number; country: string; day: number }[] = [];
+  for (const c of demoCourses) {
+    for (let i = 0; i < c.buyers; i++) {
+      const day = recentDay(c.span, c.minDay ?? 0);
+      const country = pickCountry();
+      const student = createDemoStudent(day);
+      demoPurchase(student.id, c.course.id, c.course.price, country, day);
+      demoEnroll(student.id, c.course.id, c.lessonIds, day, c.cliff);
+      demoEnrollmentCount++;
+      if (c.course.id === course1.id) course1Buyers.push({ id: student.id, country, day });
+    }
+  }
+
+  // Some course 1 buyers come back for course 2.
+  for (const buyer of course1Buyers.filter(() => rand() < 0.15)) {
+    const day = Math.floor(buyer.day * rand());
+    demoPurchase(buyer.id, course2.id, course2.price, buyer.country, day);
+    demoEnroll(buyer.id, course2.id, course2LessonIds, day, 8);
+    demoEnrollmentCount++;
+  }
+
+  // Team purchases: seats are coupons; claimed seats get a student and an enrollment.
+  const demoTeams = [
+    { course: course1, lessonIds: course1LessonIds, seats: 12, claimed: 7, day: 20, country: "DE", cliff: 8 },
+    { course: course1, lessonIds: course1LessonIds, seats: 6, claimed: 1, day: 75, country: "US", cliff: 8 },
+    { course: course2, lessonIds: course2LessonIds, seats: 8, claimed: 3, day: 45, country: "GB", cliff: 8 },
+  ];
+  let demoCouponCount = 0;
+  for (const t of demoTeams) {
+    const lead = createDemoStudent(t.day);
+    const [team] = db.insert(schema.teams).values({ createdAt: daysAgo(t.day) }).returning().all();
+    db.insert(schema.teamMembers)
+      .values({ teamId: team.id, userId: lead.id, role: TeamMemberRole.Admin, createdAt: daysAgo(t.day) })
+      .run();
+    const row = demoPurchase(lead.id, t.course.id, t.course.price, t.country, t.day, t.seats);
+    for (let i = 0; i < t.seats; i++) {
+      demoCouponCount++;
+      const claimDay = Math.max(0, t.day - 1 - i);
+      const member = i < t.claimed ? createDemoStudent(claimDay) : null;
+      db.insert(schema.coupons)
+        .values({
+          teamId: team.id,
+          courseId: t.course.id,
+          code: `DEMO-TEAM-${String(demoCouponCount).padStart(4, "0")}`,
+          purchaseId: row.id,
+          redeemedByUserId: member?.id ?? null,
+          redeemedAt: member ? daysAgo(claimDay) : null,
+          createdAt: daysAgo(t.day),
+        })
+        .run();
+      if (member) {
+        demoEnroll(member.id, t.course.id, t.lessonIds, claimDay, t.cliff);
+        demoEnrollmentCount++;
+      }
+    }
+  }
+
+  // Internal test purchases of the draft course: must not reach the roll-up.
+  for (let i = 0; i < 3; i++) {
+    const tester = createDemoStudent(5);
+    demoPurchase(tester.id, draft.course.id, draft.course.price, "US", 2 + i);
+    demoEnroll(tester.id, draft.course.id, draft.lessonIds, 2 + i, 1);
+    demoEnrollmentCount++;
+  }
+
+  console.log(
+    `Created analytics demo data: ${demoStudentCount} students, ${demoPurchaseCount} purchases ` +
+      `(${demoTeams.length} team, ${demoCouponCount} seats), ${demoEnrollmentCount} enrollments, ` +
+      `plus an archived and a draft course for ${instructor1.name}.`
+  );
+
   console.log("\n✓ Seed complete!");
-  console.log("  Users: 9 (1 admin, 2 instructors, 6 students)");
+  console.log(`  Users: ${9 + demoStudentCount} (1 admin, 2 instructors, ${6 + demoStudentCount} students)`);
   console.log("  Categories: 5");
   console.log(
-    `  Courses: 2 (${course1LessonIds.length} + ${course2LessonIds.length} lessons)`
+    `  Courses: 4 (${course1LessonIds.length} + ${course2LessonIds.length} lessons, plus 1 archived and 1 draft demo course)`
   );
   console.log("  Quizzes: 3");
-  console.log("  Enrollments: 7");
+  console.log(`  Enrollments: ${7 + demoEnrollmentCount}`);
   console.log("  Course ratings: 6");
   console.log("  Lesson comments: 15 (4 questions awaiting an answer)");
-  console.log("  Purchases: 6 (5 individual + 1 team)");
-  console.log("  Teams: 1 (with 5 coupons)");
+  console.log(`  Purchases: ${6 + demoPurchaseCount} (${5 + demoPurchaseCount - demoTeams.length} individual + ${1 + demoTeams.length} team)`);
+  console.log(`  Teams: ${1 + demoTeams.length} (with ${5 + demoCouponCount} coupons)`);
 }
 
 seed().catch(console.error);
