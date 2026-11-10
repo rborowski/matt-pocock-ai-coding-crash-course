@@ -1,4 +1,4 @@
-import { and, count, eq, gt, gte, isNotNull, lt, lte, ne, sql, type SQL } from "drizzle-orm";
+import { and, count, countDistinct, eq, gt, gte, inArray, isNotNull, lt, lte, ne, sql, type SQL } from "drizzle-orm";
 import { db } from "~/db";
 import {
   getCourseRatingSummaries,
@@ -105,6 +105,42 @@ export type InstructorAnalytics = {
   topBuyers: TopBuyer[];
 };
 
+/** One lesson in the drop-off funnel. */
+export type FunnelLesson = {
+  lessonId: number;
+  title: string;
+  /** Cohort students with a completed lesson-progress record for this lesson. */
+  studentsCompleted: number;
+  /** studentsCompleted / cohort size, 0–1. Null if the cohort is empty. */
+  completionRate: number | null;
+  /**
+   * Fall in completion rate from the previous lesson in course order (from 1
+   * for the first lesson), 0–1. Negative if it rose. Null if the cohort is empty.
+   */
+  dropFromPrevious: number | null;
+};
+
+/** A module heading in the funnel and its lessons. */
+export type FunnelModule = {
+  moduleId: number;
+  title: string;
+  /** By lesson position. */
+  lessons: FunnelLesson[];
+};
+
+/** Lesson-by-lesson completion of the range's cohort, in course order. */
+export type LessonFunnel = {
+  /** Enrollments within the range — every lesson's denominator. */
+  cohortSize: number;
+  /**
+   * The lesson with the largest dropFromPrevious, earliest on a tie. Null if
+   * the cohort is empty or no lesson's completion fell.
+   */
+  biggestDropLessonId: number | null;
+  /** By module position. */
+  modules: FunnelModule[];
+};
+
 export type CourseAnalytics = {
   range: AnalyticsRange;
   cards: HeadlineCards;
@@ -113,6 +149,8 @@ export type CourseAnalytics = {
   revenueByCountry: CountryRevenue[];
   /** Up to COURSE_TOP_BUYERS, by gross spent then seats bought. */
   topBuyers: TopBuyer[];
+  /** Where the range's cohort stops completing lessons. */
+  lessonFunnel: LessonFunnel;
 };
 
 const DAY_MS = 86_400_000;
@@ -363,9 +401,74 @@ function topBuyers(purchaseRows: ReturnType<typeof getPurchases>, limit: number)
 }
 
 /**
+ * Each lesson's completion by the course's cohort in the window. Based on
+ * lesson progress only; video watch events are not used.
+ */
+function lessonFunnel(courseId: number, window: DateWindow, cohortSize: number): LessonFunnel {
+  const cohort = db
+    .select({ userId: enrollments.userId })
+    .from(enrollments)
+    .where(and(eq(enrollments.courseId, courseId), withinWindow(enrollments.enrolledAt, window)));
+
+  const completed = db
+    .select({ n: countDistinct(lessonProgress.userId) })
+    .from(lessonProgress)
+    .where(
+      and(
+        eq(lessonProgress.lessonId, lessons.id),
+        eq(lessonProgress.status, LessonProgressStatus.Completed),
+        inArray(lessonProgress.userId, cohort)
+      )
+    );
+
+  const rows = db
+    .select({
+      moduleId: modules.id,
+      moduleTitle: modules.title,
+      lessonId: lessons.id,
+      lessonTitle: lessons.title,
+      studentsCompleted: sql<number>`(${completed})`.mapWith(Number),
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(modules.position, lessons.position)
+    .all();
+
+  const funnelModules: FunnelModule[] = [];
+  let previousRate = 1;
+  let biggestDrop = 0;
+  let biggestDropLessonId: number | null = null;
+  for (const row of rows) {
+    let module = funnelModules.at(-1);
+    if (module?.moduleId !== row.moduleId) {
+      module = { moduleId: row.moduleId, title: row.moduleTitle, lessons: [] };
+      funnelModules.push(module);
+    }
+
+    const completionRate = cohortSize === 0 ? null : row.studentsCompleted / cohortSize;
+    const dropFromPrevious = completionRate === null ? null : previousRate - completionRate;
+    if (dropFromPrevious !== null && dropFromPrevious > biggestDrop) {
+      biggestDrop = dropFromPrevious;
+      biggestDropLessonId = row.lessonId;
+    }
+    if (completionRate !== null) previousRate = completionRate;
+
+    module.lessons.push({
+      lessonId: row.lessonId,
+      title: row.lessonTitle,
+      studentsCompleted: row.studentsCompleted,
+      completionRate,
+      dropFromPrevious,
+    });
+  }
+  return { cohortSize, biggestDropLessonId, modules: funnelModules };
+}
+
+/**
  * Loads a scope's purchases and enrollments in the range and derives the
- * headline cards and previous-period comparison. The rows are returned for
- * callers that break them down further.
+ * headline cards and previous-period comparison. The window and rows are
+ * returned for callers that break them down further.
  */
 function loadHeadlineFigures(scope: AnalyticsScope, range: AnalyticsRange, now: Date) {
   const window = currentWindow(range, now);
@@ -399,7 +502,7 @@ function loadHeadlineFigures(scope: AnalyticsScope, range: AnalyticsRange, now: 
     ...completionMetrics(enrollmentRows),
   };
 
-  return { cards, comparison, purchaseRows, enrollmentRows };
+  return { window, cards, comparison, purchaseRows, enrollmentRows };
 }
 
 /** The cross-course roll-up for one instructor, or every instructor when null. */
@@ -426,12 +529,17 @@ export function getCourseAnalytics(
   range: AnalyticsRange,
   now: Date
 ): CourseAnalytics {
-  const { cards, comparison, purchaseRows } = loadHeadlineFigures({ courseId }, range, now);
+  const { window, cards, comparison, purchaseRows, enrollmentRows } = loadHeadlineFigures(
+    { courseId },
+    range,
+    now
+  );
   return {
     range,
     cards,
     comparison,
     revenueByCountry: revenueByCountry(purchaseRows),
     topBuyers: topBuyers(purchaseRows, COURSE_TOP_BUYERS),
+    lessonFunnel: lessonFunnel(courseId, window, enrollmentRows.length),
   };
 }

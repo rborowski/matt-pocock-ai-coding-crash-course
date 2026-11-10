@@ -8,6 +8,7 @@ import {
   type AnalyticsRange,
   type CountryRevenue,
   type HeadlineCards,
+  type LessonFunnel,
   type PeriodComparison,
   type TopBuyer,
 } from "~/services/analyticsService";
@@ -186,6 +187,81 @@ export function RevenueByCountry({ rows }: { rows: CountryRevenue[] }) {
             ))}
           </ul>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Percentage points, e.g. 0.5 → "50 pts". */
+function formatPoints(fraction: number) {
+  return `${Math.round(fraction * 100)} pts`;
+}
+
+function dropLabel(dropFromPrevious: number | null, isBiggestDrop: boolean) {
+  if (dropFromPrevious === null || dropFromPrevious <= 0) return "";
+  const points = `−${formatPoints(dropFromPrevious)}`;
+  return isBiggestDrop ? `Biggest drop ${points}` : points;
+}
+
+export function LessonFunnelChart({ funnel }: { funnel: LessonFunnel }) {
+  if (funnel.modules.length === 0) {
+    return (
+      <Card className="gap-3 py-4">
+        <CardContent className="px-4">
+          <p className="text-sm text-muted-foreground">This course has no lessons yet.</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="gap-3 py-4">
+      <CardContent className="space-y-5 px-4">
+        {funnel.cohortSize === 0 && (
+          <p className="text-sm text-muted-foreground">No enrollments in this range.</p>
+        )}
+        {funnel.modules.map((module) => (
+          <section key={module.moduleId}>
+            <h3 className="mb-2 text-sm font-medium">{module.title}</h3>
+            <ul className="space-y-2">
+              {module.lessons.map((lesson) => {
+                const isBiggestDrop = lesson.lessonId === funnel.biggestDropLessonId;
+                return (
+                  <li
+                    key={lesson.lessonId}
+                    className={cn(
+                      "grid grid-cols-[minmax(8rem,16rem)_1fr_3.5rem_7rem] items-center gap-3 rounded-md px-2 py-1 text-sm",
+                      isBiggestDrop && "bg-amber-500/10 ring-1 ring-amber-500/40"
+                    )}
+                  >
+                    <span className="truncate" title={lesson.title}>
+                      {lesson.title}
+                    </span>
+                    <div className="h-2 rounded-full bg-muted">
+                      <div
+                        className={cn("h-2 rounded-full", isBiggestDrop ? "bg-amber-500" : "bg-primary")}
+                        style={{ width: `${(lesson.completionRate ?? 0) * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-right tabular-nums">
+                      {formatPercent(lesson.completionRate)}
+                    </span>
+                    <span
+                      className={cn(
+                        "text-right text-xs tabular-nums",
+                        isBiggestDrop
+                          ? "font-medium text-amber-700 dark:text-amber-400"
+                          : "text-muted-foreground"
+                      )}
+                    >
+                      {dropLabel(lesson.dropFromPrevious, isBiggestDrop)}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        ))}
       </CardContent>
     </Card>
   );

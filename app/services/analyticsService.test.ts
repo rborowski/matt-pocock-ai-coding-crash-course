@@ -92,19 +92,25 @@ function enroll(
     .get();
 }
 
-function addLessons(courseId: number, count: number) {
-  const module = testDb
+function addModule(courseId: number, title: string, position: number) {
+  return testDb
     .insert(schema.modules)
-    .values({ courseId, title: "Module", position: 1 })
+    .values({ courseId, title, position })
     .returning()
     .get();
-  return Array.from({ length: count }, (_, i) =>
-    testDb
-      .insert(schema.lessons)
-      .values({ moduleId: module.id, title: `Lesson ${i + 1}`, position: i + 1 })
-      .returning()
-      .get()
-  );
+}
+
+function addLesson(moduleId: number, title: string, position: number) {
+  return testDb
+    .insert(schema.lessons)
+    .values({ moduleId, title, position })
+    .returning()
+    .get();
+}
+
+function addLessons(courseId: number, count: number) {
+  const module = addModule(courseId, "Module", 1);
+  return Array.from({ length: count }, (_, i) => addLesson(module.id, `Lesson ${i + 1}`, i + 1));
 }
 
 function progress(
@@ -782,6 +788,120 @@ describe("analyticsService.getCourseAnalytics", () => {
       expect(topBuyers[1].courses).toEqual([
         { courseId: base.course.id, title: base.course.title },
       ]);
+    });
+  });
+
+  describe("lesson funnel", () => {
+    it("lists lessons in course order, grouped under their modules", () => {
+      // Inserted out of order: position decides, not insertion order.
+      const second = addModule(base.course.id, "Advanced", 2);
+      const first = addModule(base.course.id, "Basics", 1);
+      addLesson(second.id, "Deploying", 2);
+      addLesson(second.id, "Testing", 1);
+      addLesson(first.id, "Setup", 2);
+      addLesson(first.id, "Welcome", 1);
+
+      const { lessonFunnel } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(
+        lessonFunnel.modules.map((m) => [m.title, m.lessons.map((l) => l.title)])
+      ).toEqual([
+        ["Basics", ["Welcome", "Setup"]],
+        ["Advanced", ["Testing", "Deploying"]],
+      ]);
+    });
+
+    it("reports each lesson's completion out of the whole cohort and flags the biggest drop", () => {
+      const basics = addModule(base.course.id, "Basics", 1);
+      const advanced = addModule(base.course.id, "Advanced", 2);
+      const l1 = addLesson(basics.id, "Welcome", 1);
+      const l2 = addLesson(basics.id, "Setup", 2);
+      const l3 = addLesson(advanced.id, "Testing", 1);
+      const l4 = addLesson(advanced.id, "Deploying", 2);
+
+      const s1 = createStudent();
+      enroll(s1.id, base.course.id, daysAgo(10));
+      [l1, l2, l3, l4].forEach((l) => progress(s1.id, l.id));
+      const s2 = createStudent();
+      enroll(s2.id, base.course.id, daysAgo(10));
+      [l1, l2].forEach((l) => progress(s2.id, l.id));
+      const s3 = createStudent();
+      enroll(s3.id, base.course.id, daysAgo(10));
+      [l1, l2].forEach((l) => progress(s3.id, l.id));
+      // Started but not completed: not counted.
+      progress(s3.id, l3.id, schema.LessonProgressStatus.InProgress);
+      // Enrolled, never started: still in the denominator.
+      enroll(createStudent().id, base.course.id, daysAgo(10));
+
+      // Enrolled before the range: not in the cohort.
+      const old = createStudent();
+      enroll(old.id, base.course.id, daysAgo(40));
+      [l1, l2, l3, l4].forEach((l) => progress(old.id, l.id));
+
+      const { lessonFunnel } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(lessonFunnel.cohortSize).toBe(4);
+      // 100% → 75% → 75% → 25% → 25%: the largest step down is into Testing.
+      expect(lessonFunnel.biggestDropLessonId).toBe(l3.id);
+      expect(
+        lessonFunnel.modules.flatMap((m) =>
+          m.lessons.map((l) => [l.title, l.studentsCompleted, l.completionRate, l.dropFromPrevious])
+        )
+      ).toEqual([
+        ["Welcome", 3, 0.75, 0.25],
+        ["Setup", 3, 0.75, 0],
+        ["Testing", 1, 0.25, 0.5],
+        ["Deploying", 1, 0.25, 0],
+      ]);
+    });
+
+    it("compares the first lesson against 100%", () => {
+      const basics = addModule(base.course.id, "Basics", 1);
+      const l1 = addLesson(basics.id, "Welcome", 1);
+      addLesson(basics.id, "Setup", 2);
+      // 100% → 25% → 0%: the first lesson loses the most.
+      const keen = createStudent();
+      enroll(keen.id, base.course.id, daysAgo(1));
+      progress(keen.id, l1.id);
+      for (let i = 0; i < 3; i++) enroll(createStudent().id, base.course.id, daysAgo(1));
+
+      const { lessonFunnel } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(lessonFunnel.biggestDropLessonId).toBe(l1.id);
+      expect(lessonFunnel.modules[0].lessons.map((l) => l.completionRate)).toEqual([
+        0.25, 0,
+      ]);
+    });
+
+    it("still lists the lessons for a course nobody enrolled in, with no rates", () => {
+      const basics = addModule(base.course.id, "Basics", 1);
+      const l1 = addLesson(basics.id, "Welcome", 1);
+      // Enrolled before the range only.
+      const old = createStudent();
+      enroll(old.id, base.course.id, daysAgo(40));
+      progress(old.id, l1.id);
+
+      const { lessonFunnel } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(lessonFunnel).toEqual({
+        cohortSize: 0,
+        biggestDropLessonId: null,
+        modules: [
+          {
+            moduleId: basics.id,
+            title: "Basics",
+            lessons: [
+              {
+                lessonId: l1.id,
+                title: "Welcome",
+                studentsCompleted: 0,
+                completionRate: null,
+                dropFromPrevious: null,
+              },
+            ],
+          },
+        ],
+      });
     });
   });
 });

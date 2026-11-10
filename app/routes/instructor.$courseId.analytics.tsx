@@ -6,6 +6,7 @@ import { getCourseById } from "~/services/courseService";
 import { getCourseAnalytics, parseAnalyticsRange } from "~/services/analyticsService";
 import {
   HeadlineCardGrid,
+  LessonFunnelChart,
   RangeNav,
   RevenueByCountry,
   TopBuyersTable,
@@ -44,7 +45,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
 export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps) {
   const { course, analytics } = loaderData;
-  const { range, cards, comparison, revenueByCountry, topBuyers } = analytics;
+  const { range, cards, comparison, revenueByCountry, topBuyers, lessonFunnel } = analytics;
   // Back to the roll-up with the same range (and an admin's instructorId).
   const [searchParams] = useSearchParams();
   const rollupParams = new URLSearchParams(searchParams);
@@ -100,6 +101,16 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
         members who haven't joined yet.
       </p>
       <TopBuyersTable rows={topBuyers} />
+
+      <h2 className="mb-1 mt-8 text-lg font-semibold">Lesson drop-off</h2>
+      <p className="mb-3 text-sm text-muted-foreground">
+        Share of the {lessonFunnel.cohortSize} students who enrolled in this range that
+        completed each lesson, in course order. The lesson with the biggest drop from the one
+        before it is highlighted; the first lesson is compared against 100%. Recent
+        enrollments lower the completion of later lessons, because those students haven't
+        reached them yet.
+      </p>
+      <LessonFunnelChart funnel={lessonFunnel} />
     </div>
   );
 }
