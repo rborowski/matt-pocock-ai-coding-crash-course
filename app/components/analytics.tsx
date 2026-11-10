@@ -2,15 +2,14 @@ import { Link, useSearchParams } from "react-router";
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { Card, CardContent } from "~/components/ui/card";
 import { cn, formatPrice } from "~/lib/utils";
-import {
-  ANALYTICS_RANGES,
-  PLATFORM_FEE_RATE,
-  type AnalyticsRange,
-  type CountryRevenue,
-  type HeadlineCards,
-  type LessonFunnel,
-  type PeriodComparison,
-  type TopBuyer,
+import { ANALYTICS_RANGES, PLATFORM_FEE_RATE, type AnalyticsRange } from "~/lib/analytics";
+// Types only: a runtime import of the service drags ~/db into the browser.
+import type {
+  CountryRevenue,
+  HeadlineCards,
+  LessonFunnel,
+  PeriodComparison,
+  TopBuyer,
 } from "~/services/analyticsService";
 
 // ─── Analytics UI ───

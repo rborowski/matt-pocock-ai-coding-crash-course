@@ -1,5 +1,6 @@
 import { and, count, countDistinct, eq, gt, gte, inArray, isNotNull, lt, lte, ne, sql, type SQL } from "drizzle-orm";
 import { db } from "~/db";
+import { PLATFORM_FEE_RATE, type AnalyticsRange } from "~/lib/analytics";
 import {
   getCourseRatingSummaries,
   type CourseRatingSummary,
@@ -22,15 +23,12 @@ import {
 // that range windows are deterministic.
 // Uses positional parameters (project convention).
 
-export const PLATFORM_FEE_RATE = 0.2;
-
-export const ANALYTICS_RANGES = ["30d", "90d", "all"] as const;
-export type AnalyticsRange = (typeof ANALYTICS_RANGES)[number];
-
-/** Reads a `range` query value, falling back to the 30-day default. */
-export function parseAnalyticsRange(value: string | null): AnalyticsRange {
-  return ANALYTICS_RANGES.find((r) => r === value) ?? "30d";
-}
+export {
+  ANALYTICS_RANGES,
+  PLATFORM_FEE_RATE,
+  parseAnalyticsRange,
+  type AnalyticsRange,
+} from "~/lib/analytics";
 
 export type HeadlineCards = {
   grossCents: number;
