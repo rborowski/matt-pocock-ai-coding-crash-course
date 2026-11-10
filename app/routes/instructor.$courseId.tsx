@@ -65,6 +65,7 @@ import {
   Settings,
   Trash2,
   Users,
+  BarChart3,
   AlertTriangle,
   Award,
   Globe,
@@ -1177,24 +1178,33 @@ export default function InstructorCourseEditor({
 
       {/* Tabs */}
       <Tabs defaultValue="content">
-        <TabsList>
-          <TabsTrigger value="content">
-            <BookOpen className="size-4" />
-            Content
-          </TabsTrigger>
-          <TabsTrigger value="settings">
-            <Settings className="size-4" />
-            Settings
-          </TabsTrigger>
-          <TabsTrigger value="sales-copy">
-            <FileText className="size-4" />
-            Sales Copy
-          </TabsTrigger>
-          <TabsTrigger value="students">
-            <Users className="size-4" />
-            Students
-          </TabsTrigger>
-        </TabsList>
+        <div className="flex flex-wrap items-center gap-2">
+          <TabsList>
+            <TabsTrigger value="content">
+              <BookOpen className="size-4" />
+              Content
+            </TabsTrigger>
+            <TabsTrigger value="settings">
+              <Settings className="size-4" />
+              Settings
+            </TabsTrigger>
+            <TabsTrigger value="sales-copy">
+              <FileText className="size-4" />
+              Sales Copy
+            </TabsTrigger>
+            <TabsTrigger value="students">
+              <Users className="size-4" />
+              Students
+            </TabsTrigger>
+          </TabsList>
+          <Link
+            to={`/instructor/${course.id}/analytics`}
+            className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
+          >
+            <BarChart3 className="size-4" />
+            Analytics
+          </Link>
+        </div>
 
         {/* Content Tab */}
         <TabsContent value="content" className="mt-6">

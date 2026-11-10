@@ -8,15 +8,24 @@ import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card"
 import {
   getInstructorAnalytics,
   parseAnalyticsRange,
-  ANALYTICS_RANGES,
-  PLATFORM_FEE_RATE,
   type AnalyticsRange,
-  type CountryRevenue,
   type CourseRow,
   type InstructorAnalytics,
-  type TopBuyer,
 } from "~/services/analyticsService";
-import { cn, formatPrice } from "~/lib/utils";
+import {
+  BODY_CELL,
+  EARNINGS_LABEL,
+  HEADER_CELL,
+  HeadlineCardGrid,
+  NUMBER_CELL,
+  NUMBER_HEADER_CELL,
+  RangeNav,
+  RevenueByCountry,
+  TopBuyersTable,
+  formatMoney,
+  formatPercent,
+} from "~/components/analytics";
+import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import {
@@ -28,8 +37,6 @@ import {
 } from "~/components/ui/select";
 import {
   AlertTriangle,
-  ArrowDownRight,
-  ArrowUpRight,
   BookOpen,
   GraduationCap,
   MessageCircleQuestion,
@@ -118,73 +125,20 @@ export async function loader({ request }: Route.LoaderArgs) {
   };
 }
 
-const RANGE_LABELS: Record<AnalyticsRange, string> = {
-  "30d": "Last 30 days",
-  "90d": "Last 90 days",
-  all: "All time",
-};
-
-const EARNINGS_LABEL = `Your earnings (${Math.round((1 - PLATFORM_FEE_RATE) * 100)}%)`;
-
-/** formatPrice renders 0 as "Free", which reads wrongly for revenue. */
-function formatMoney(cents: number) {
-  return cents === 0 ? "$0.00" : formatPrice(cents);
-}
-
-function formatPercent(fraction: number | null) {
-  return fraction === null ? "—" : `${Math.round(fraction * 100)}%`;
-}
-
-function ChangeBadge({ changePct, previous }: { changePct: number | null; previous: string }) {
-  if (changePct === null) {
-    return (
-      <p className="mt-1 text-xs text-muted-foreground">
-        No activity in the previous period
-      </p>
-    );
-  }
-  const up = changePct >= 0;
-  const Arrow = up ? ArrowUpRight : ArrowDownRight;
-  return (
-    <p
-      className={cn(
-        "mt-1 flex items-center gap-1 text-xs",
-        up ? "text-green-700 dark:text-green-400" : "text-red-700 dark:text-red-400"
-      )}
-    >
-      <Arrow className="size-3" />
-      {up ? "+" : ""}
-      {changePct}% vs previous period ({previous})
-    </p>
-  );
-}
-
-function StatCard({
-  label,
-  value,
-  children,
+function CourseTable({
+  rows,
+  showInstructor,
+  range,
 }: {
-  label: string;
-  value: string;
-  children?: React.ReactNode;
+  rows: CourseRow[];
+  showInstructor: boolean;
+  range: AnalyticsRange;
 }) {
-  return (
-    <Card className="gap-2 py-4">
-      <CardContent className="px-4">
-        <p className="text-sm text-muted-foreground">{label}</p>
-        <p className="mt-1 text-2xl font-bold">{value}</p>
-        {children}
-      </CardContent>
-    </Card>
-  );
-}
+  // Carry range (and an admin's instructorId) into the deep dive and back.
+  const [searchParams] = useSearchParams();
+  const params = new URLSearchParams(searchParams);
+  params.set("range", range);
 
-const HEADER_CELL = "px-4 py-3 text-xs font-medium uppercase tracking-wider text-muted-foreground";
-const NUMBER_HEADER_CELL = cn(HEADER_CELL, "text-right");
-const BODY_CELL = "px-4 py-3 text-sm";
-const NUMBER_CELL = cn(BODY_CELL, "text-right");
-
-function CourseTable({ rows, showInstructor }: { rows: CourseRow[]; showInstructor: boolean }) {
   return (
     <Card className="py-0">
       <CardContent className="overflow-x-auto px-0">
@@ -211,7 +165,12 @@ function CourseTable({ rows, showInstructor }: { rows: CourseRow[]; showInstruct
               rows.map((row) => (
                 <tr key={row.courseId} className="border-b border-border last:border-0">
                   <td className={cn(BODY_CELL, "font-medium")}>
-                    {row.title}
+                    <Link
+                      to={`/instructor/${row.courseId}/analytics?${params}`}
+                      className="hover:text-primary hover:underline"
+                    >
+                      {row.title}
+                    </Link>
                   </td>
                   {showInstructor && <td className={BODY_CELL}>{row.instructorName}</td>}
                   <td className={NUMBER_CELL}>
@@ -235,102 +194,6 @@ function CourseTable({ rows, showInstructor }: { rows: CourseRow[]; showInstruct
                         <span className="text-xs text-muted-foreground">({row.rating.count})</span>
                       </span>
                     )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </CardContent>
-    </Card>
-  );
-}
-
-function RevenueByCountry({ rows }: { rows: CountryRevenue[] }) {
-  const maxGrossCents = Math.max(0, ...rows.map((r) => r.grossCents));
-  return (
-    <Card className="gap-3 py-4">
-      <CardContent className="px-4">
-        {rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No sales in this range.</p>
-        ) : (
-          <ul className="space-y-2">
-            {rows.map((row) => (
-              <li key={row.country ?? "unknown"} className="grid grid-cols-[5rem_1fr_6rem] items-center gap-3 text-sm">
-                <span>{row.country ?? "Unknown"}</span>
-                <div className="h-2 rounded-full bg-muted">
-                  <div
-                    className="h-2 rounded-full bg-primary"
-                    style={{ width: `${maxGrossCents === 0 ? 0 : (row.grossCents / maxGrossCents) * 100}%` }}
-                  />
-                </div>
-                <span className="text-right tabular-nums">{formatMoney(row.grossCents)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function formatDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
-
-function TopBuyersTable({ rows }: { rows: TopBuyer[] }) {
-  return (
-    <Card className="py-0">
-      <CardContent className="overflow-x-auto px-0">
-        <table className="w-full">
-          <thead>
-            <tr className="border-b border-border bg-muted/50">
-              <th className={cn(HEADER_CELL, "text-left")}>Buyer</th>
-              <th className={NUMBER_HEADER_CELL}>Total spent</th>
-              <th className={NUMBER_HEADER_CELL}>Seats bought</th>
-              <th className={NUMBER_HEADER_CELL}>Claimed</th>
-              <th className={NUMBER_HEADER_CELL}>Unclaimed</th>
-              <th className={cn(HEADER_CELL, "text-left")}>Courses</th>
-              <th className={NUMBER_HEADER_CELL}>Last purchase</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={7} className={cn(BODY_CELL, "text-center text-muted-foreground")}>
-                  No sales in this range.
-                </td>
-              </tr>
-            ) : (
-              rows.map((row) => (
-                <tr key={row.userId} className="border-b border-border last:border-0">
-                  <td className={BODY_CELL}>
-                    <span className="block font-medium">{row.name}</span>
-                    <a
-                      href={`mailto:${row.email}`}
-                      className="text-xs text-muted-foreground hover:text-foreground hover:underline"
-                    >
-                      {row.email}
-                    </a>
-                  </td>
-                  <td className={NUMBER_CELL}>{formatMoney(row.grossCents)}</td>
-                  <td className={NUMBER_CELL}>{row.seatsBought}</td>
-                  <td className={NUMBER_CELL}>{row.seatsClaimed}</td>
-                  <td
-                    className={cn(
-                      NUMBER_CELL,
-                      row.seatsUnclaimed > 0 && "font-medium text-amber-700 dark:text-amber-400"
-                    )}
-                  >
-                    {row.seatsUnclaimed}
-                  </td>
-                  <td className={BODY_CELL}>{row.courses.map((c) => c.title).join(", ")}</td>
-                  <td className={cn(NUMBER_CELL, "whitespace-nowrap")}>
-                    {formatDate(row.lastPurchasedAt)}
                   </td>
                 </tr>
               ))
@@ -393,14 +256,6 @@ function AnalyticsSection({
   selectedInstructorId: number | null;
 }) {
   const { range, cards, comparison, courses, revenueByCountry, topBuyers } = analytics;
-  const [searchParams] = useSearchParams();
-
-  function rangeHref(r: AnalyticsRange) {
-    const params = new URLSearchParams(searchParams);
-    params.set("range", r);
-    return `?${params}`;
-  }
-
   return (
     <section className="mb-10">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -419,69 +274,18 @@ function AnalyticsSection({
             <MessageCircleQuestion className="size-4" />
             Student questions
           </Link>
-          <nav aria-label="Time range" className="inline-flex rounded-md border p-0.5">
-            {ANALYTICS_RANGES.map((r) => (
-              <Link
-                key={r}
-                to={rangeHref(r)}
-                preventScrollReset
-                aria-current={r === range ? "page" : undefined}
-                className={cn(
-                  "rounded px-3 py-1 text-sm",
-                  r === range
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {RANGE_LABELS[r]}
-              </Link>
-            ))}
-          </nav>
+          <RangeNav range={range} />
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <StatCard label={EARNINGS_LABEL} value={formatMoney(cards.earningsCents)}>
-          <p className="text-xs text-muted-foreground">
-            Gross sales {formatMoney(cards.grossCents)}
-          </p>
-          {comparison && (
-            <ChangeBadge
-              changePct={comparison.revenueChangePct}
-              previous={formatMoney(comparison.previousEarningsCents)}
-            />
-          )}
-        </StatCard>
-        <StatCard label="Students" value={String(cards.students)}>
-          {comparison && (
-            <ChangeBadge
-              changePct={comparison.studentsChangePct}
-              previous={String(comparison.previousStudents)}
-            />
-          )}
-        </StatCard>
-        <StatCard label="Buyers" value={String(cards.buyers)} />
-        <StatCard
-          label="Seats sold / claimed"
-          value={`${cards.seatsSold} / ${cards.seatsClaimed}`}
-        />
-        <StatCard
-          label="Strict completion rate"
-          value={formatPercent(cards.strictCompletionRate)}
-        >
-          <p className="text-xs text-muted-foreground">
-            Students who enrolled in this range and finished
-          </p>
-        </StatCard>
-        <StatCard label="Average progress" value={formatPercent(cards.averageProgress)}>
-          <p className="text-xs text-muted-foreground">
-            Lessons completed per student, as a share of the course
-          </p>
-        </StatCard>
-      </div>
+      <HeadlineCardGrid cards={cards} comparison={comparison} />
 
       <h3 className="mb-3 mt-8 text-lg font-semibold">Courses</h3>
-      <CourseTable rows={courses} showInstructor={isAdmin && selectedInstructorId === null} />
+      <CourseTable
+        rows={courses}
+        showInstructor={isAdmin && selectedInstructorId === null}
+        range={range}
+      />
 
       <h3 className="mb-1 mt-8 text-lg font-semibold">Revenue by country</h3>
       <p className="mb-3 text-sm text-muted-foreground">

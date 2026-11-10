@@ -91,7 +91,8 @@ export type TopBuyer = {
   lastPurchasedAt: string;
 };
 
-const TOP_BUYERS_LIMIT = 10;
+const ROLLUP_TOP_BUYERS = 10;
+const COURSE_TOP_BUYERS = 5;
 
 export type InstructorAnalytics = {
   range: AnalyticsRange;
@@ -100,7 +101,17 @@ export type InstructorAnalytics = {
   courses: CourseRow[];
   /** Largest first. */
   revenueByCountry: CountryRevenue[];
-  /** Up to TOP_BUYERS_LIMIT, by gross spent then seats bought. */
+  /** Up to ROLLUP_TOP_BUYERS, by gross spent then seats bought. */
+  topBuyers: TopBuyer[];
+};
+
+export type CourseAnalytics = {
+  range: AnalyticsRange;
+  cards: HeadlineCards;
+  comparison: PeriodComparison | null;
+  /** Largest first. */
+  revenueByCountry: CountryRevenue[];
+  /** Up to COURSE_TOP_BUYERS, by gross spent then seats bought. */
   topBuyers: TopBuyer[];
 };
 
@@ -175,11 +186,17 @@ function earningsFor(grossCents: number) {
   return Math.round(grossCents * (1 - PLATFORM_FEE_RATE));
 }
 
-/** Published and archived courses, optionally limited to one instructor. */
-function courseScope(instructorId: number | null): SQL | undefined {
+/**
+ * Which courses the figures cover: an instructor's published and archived
+ * courses (every instructor's when null), or one course whatever its status.
+ */
+type AnalyticsScope = { instructorId: number | null } | { courseId: number };
+
+function courseScope(scope: AnalyticsScope): SQL | undefined {
+  if ("courseId" in scope) return eq(courses.id, scope.courseId);
   return and(
     ne(courses.status, CourseStatus.Draft),
-    instructorId === null ? undefined : eq(courses.instructorId, instructorId)
+    scope.instructorId === null ? undefined : eq(courses.instructorId, scope.instructorId)
   );
 }
 
@@ -190,7 +207,7 @@ function courseScope(instructorId: number | null): SQL | undefined {
  * seat per generated coupon, claimed once redeemed. An individual purchase has
  * no coupons and counts as one claimed seat.
  */
-function getPurchases(instructorId: number | null, window: DateWindow) {
+function getPurchases(scope: AnalyticsScope, window: DateWindow) {
   const rows = db
     .select({
       userId: purchases.userId,
@@ -210,7 +227,7 @@ function getPurchases(instructorId: number | null, window: DateWindow) {
     .leftJoin(coupons, eq(coupons.purchaseId, purchases.id))
     .where(
       and(
-        courseScope(instructorId),
+        courseScope(scope),
         withinWindow(purchases.createdAt, window),
         gt(purchases.amountPaid, 0)
       )
@@ -229,7 +246,7 @@ function getPurchases(instructorId: number | null, window: DateWindow) {
  * In-scope enrollments in the window — the cohort — with each student's
  * completed lessons in that course and the course's total lessons, as of today.
  */
-function getEnrollments(instructorId: number | null, window: DateWindow) {
+function getEnrollments(scope: AnalyticsScope, window: DateWindow) {
   const totalLessons = db
     .select({ n: count() })
     .from(lessons)
@@ -258,27 +275,27 @@ function getEnrollments(instructorId: number | null, window: DateWindow) {
     })
     .from(enrollments)
     .innerJoin(courses, eq(enrollments.courseId, courses.id))
-    .where(and(courseScope(instructorId), withinWindow(enrollments.enrolledAt, window)))
+    .where(and(courseScope(scope), withinWindow(enrollments.enrolledAt, window)))
     .all();
 }
 
 /** In-scope courses, oldest first. */
-function getCourses(instructorId: number | null) {
+function getCourses(scope: AnalyticsScope) {
   return db
     .select({ id: courses.id, title: courses.title, instructorName: users.name })
     .from(courses)
     .innerJoin(users, eq(courses.instructorId, users.id))
-    .where(courseScope(instructorId))
+    .where(courseScope(scope))
     .orderBy(courses.id)
     .all();
 }
 
 function courseRows(
-  instructorId: number | null,
+  scope: AnalyticsScope,
   purchaseRows: ReturnType<typeof getPurchases>,
   enrollmentRows: ReturnType<typeof getEnrollments>
 ): CourseRow[] {
-  const scoped = getCourses(instructorId);
+  const scoped = getCourses(scope);
   const ratings = getCourseRatingSummaries(scoped.map((c) => c.id));
 
   return scoped.map((course) => {
@@ -307,7 +324,7 @@ function revenueByCountry(purchaseRows: ReturnType<typeof getPurchases>): Countr
     .sort((a, b) => b.grossCents - a.grossCents);
 }
 
-function topBuyers(purchaseRows: ReturnType<typeof getPurchases>): TopBuyer[] {
+function topBuyers(purchaseRows: ReturnType<typeof getPurchases>, limit: number): TopBuyer[] {
   const buyers = new Map<number, TopBuyer>();
   for (const p of purchaseRows) {
     let buyer = buyers.get(p.userId);
@@ -342,17 +359,18 @@ function topBuyers(purchaseRows: ReturnType<typeof getPurchases>): TopBuyer[] {
       (a, b) =>
         b.grossCents - a.grossCents || b.seatsBought - a.seatsBought || a.userId - b.userId
     )
-    .slice(0, TOP_BUYERS_LIMIT);
+    .slice(0, limit);
 }
 
-export function getInstructorAnalytics(
-  instructorId: number | null,
-  range: AnalyticsRange,
-  now: Date
-): InstructorAnalytics {
+/**
+ * Loads a scope's purchases and enrollments in the range and derives the
+ * headline cards and previous-period comparison. The rows are returned for
+ * callers that break them down further.
+ */
+function loadHeadlineFigures(scope: AnalyticsScope, range: AnalyticsRange, now: Date) {
   const window = currentWindow(range, now);
-  const purchaseRows = getPurchases(instructorId, window);
-  const enrollmentRows = getEnrollments(instructorId, window);
+  const purchaseRows = getPurchases(scope, window);
+  const enrollmentRows = getEnrollments(scope, window);
 
   const grossCents = sumGross(purchaseRows);
   const students = enrollmentRows.length;
@@ -360,8 +378,8 @@ export function getInstructorAnalytics(
   let comparison: PeriodComparison | null = null;
   if (range !== "all") {
     const previous = previousWindow(range, now);
-    const previousGrossCents = sumGross(getPurchases(instructorId, previous));
-    const previousStudents = getEnrollments(instructorId, previous).length;
+    const previousGrossCents = sumGross(getPurchases(scope, previous));
+    const previousStudents = getEnrollments(scope, previous).length;
     comparison = {
       previousGrossCents,
       previousEarningsCents: earningsFor(previousGrossCents),
@@ -371,20 +389,49 @@ export function getInstructorAnalytics(
     };
   }
 
+  const cards: HeadlineCards = {
+    grossCents,
+    earningsCents: earningsFor(grossCents),
+    buyers: new Set(purchaseRows.map((p) => p.userId)).size,
+    students,
+    seatsSold: purchaseRows.reduce((sum, p) => sum + p.seats, 0),
+    seatsClaimed: purchaseRows.reduce((sum, p) => sum + p.seatsClaimed, 0),
+    ...completionMetrics(enrollmentRows),
+  };
+
+  return { cards, comparison, purchaseRows, enrollmentRows };
+}
+
+/** The cross-course roll-up for one instructor, or every instructor when null. */
+export function getInstructorAnalytics(
+  instructorId: number | null,
+  range: AnalyticsRange,
+  now: Date
+): InstructorAnalytics {
+  const scope = { instructorId };
+  const { cards, comparison, purchaseRows, enrollmentRows } = loadHeadlineFigures(scope, range, now);
   return {
     range,
-    cards: {
-      grossCents,
-      earningsCents: earningsFor(grossCents),
-      buyers: new Set(purchaseRows.map((p) => p.userId)).size,
-      students,
-      seatsSold: purchaseRows.reduce((sum, p) => sum + p.seats, 0),
-      seatsClaimed: purchaseRows.reduce((sum, p) => sum + p.seatsClaimed, 0),
-      ...completionMetrics(enrollmentRows),
-    },
+    cards,
     comparison,
-    courses: courseRows(instructorId, purchaseRows, enrollmentRows),
+    courses: courseRows(scope, purchaseRows, enrollmentRows),
     revenueByCountry: revenueByCountry(purchaseRows),
-    topBuyers: topBuyers(purchaseRows),
+    topBuyers: topBuyers(purchaseRows, ROLLUP_TOP_BUYERS),
+  };
+}
+
+/** The deep dive for one course. Access control is the caller's job. */
+export function getCourseAnalytics(
+  courseId: number,
+  range: AnalyticsRange,
+  now: Date
+): CourseAnalytics {
+  const { cards, comparison, purchaseRows } = loadHeadlineFigures({ courseId }, range, now);
+  return {
+    range,
+    cards,
+    comparison,
+    revenueByCountry: revenueByCountry(purchaseRows),
+    topBuyers: topBuyers(purchaseRows, COURSE_TOP_BUYERS),
   };
 }

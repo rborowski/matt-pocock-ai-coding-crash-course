@@ -12,7 +12,7 @@ vi.mock("~/db", () => ({
 }));
 
 // Import after mock so the module picks up our test db
-import { getInstructorAnalytics } from "./analyticsService";
+import { getCourseAnalytics, getInstructorAnalytics } from "./analyticsService";
 
 const NOW = new Date("2026-06-30T12:00:00.000Z");
 const DAY = 86_400_000;
@@ -120,6 +120,33 @@ function progress(
 
 function rate(userId: number, courseId: number, rating: number) {
   testDb.insert(schema.courseRatings).values({ userId, courseId, rating }).run();
+}
+
+function teamPurchase(
+  buyerId: number,
+  courseId: number,
+  amountPaid: number,
+  createdAt: string,
+  seats: number,
+  claimed: number
+) {
+  const team = testDb.insert(schema.teams).values({}).returning().get();
+  const row = purchase(buyerId, courseId, amountPaid, createdAt);
+  for (let i = 0; i < seats; i++) {
+    userCounter++;
+    testDb
+      .insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId,
+        code: `CODE-${userCounter}`,
+        purchaseId: row.id,
+        redeemedByUserId: i < claimed ? createStudent().id : null,
+        redeemedAt: i < claimed ? daysAgo(1) : null,
+      })
+      .run();
+  }
+  return row;
 }
 
 describe("analyticsService.getInstructorAnalytics", () => {
@@ -498,33 +525,6 @@ describe("analyticsService.getInstructorAnalytics", () => {
   });
 
   describe("top buyers", () => {
-    function teamPurchase(
-      buyerId: number,
-      courseId: number,
-      amountPaid: number,
-      createdAt: string,
-      seats: number,
-      claimed: number
-    ) {
-      const team = testDb.insert(schema.teams).values({}).returning().get();
-      const row = purchase(buyerId, courseId, amountPaid, createdAt);
-      for (let i = 0; i < seats; i++) {
-        userCounter++;
-        testDb
-          .insert(schema.coupons)
-          .values({
-            teamId: team.id,
-            courseId,
-            code: `CODE-${userCounter}`,
-            purchaseId: row.id,
-            redeemedByUserId: i < claimed ? createStudent().id : null,
-            redeemedAt: i < claimed ? daysAgo(1) : null,
-          })
-          .run();
-      }
-      return row;
-    }
-
     it("ranks buyers by gross spent within the range, breaking ties by seats bought", () => {
       const big = createStudent();
       const team = createStudent();
@@ -632,5 +632,156 @@ describe("analyticsService.getInstructorAnalytics", () => {
 
     expect(cards.grossCents).toBe(1000);
     expect(cards.students).toBe(1);
+  });
+});
+
+describe("analyticsService.getCourseAnalytics", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+    base = seedBaseData(testDb);
+  });
+
+  describe("headline cards", () => {
+    it("reports figures for that course only, within the range", () => {
+      // Same instructor, different course: must not leak in.
+      const sibling = createCourse(schema.CourseStatus.Published);
+      const lessons = addLessons(base.course.id, 2);
+
+      const finisher = createStudent();
+      purchase(finisher.id, base.course.id, 999, daysAgo(1));
+      enroll(finisher.id, base.course.id, daysAgo(1), daysAgo(1));
+      progress(finisher.id, lessons[0].id);
+      progress(finisher.id, lessons[1].id);
+
+      const starter = createStudent();
+      purchase(starter.id, base.course.id, 999, daysAgo(5));
+      enroll(starter.id, base.course.id, daysAgo(5));
+
+      const free = createStudent();
+      enroll(free.id, base.course.id, daysAgo(2));
+
+      teamPurchase(createStudent().id, base.course.id, 999, daysAgo(3), 3, 1);
+
+      // Outside the range.
+      const old = createStudent();
+      purchase(old.id, base.course.id, 5000, daysAgo(31));
+      enroll(old.id, base.course.id, daysAgo(31));
+
+      const elsewhere = createStudent();
+      purchase(elsewhere.id, sibling.id, 7000, daysAgo(1));
+      enroll(elsewhere.id, sibling.id, daysAgo(1));
+
+      const { range, cards } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(range).toBe("30d");
+      expect(cards).toEqual({
+        grossCents: 2997,
+        // Fee applied once to the total: round(2997 * 0.8) = 2398, not 3 × 799.
+        earningsCents: 2398,
+        buyers: 3,
+        students: 3,
+        seatsSold: 5,
+        seatsClaimed: 3,
+        strictCompletionRate: 1 / 3,
+        averageProgress: (1 + 0 + 0) / 3,
+      });
+    });
+
+    it("compares revenue and enrollments with the previous period for that course", () => {
+      const sibling = createCourse(schema.CourseStatus.Published);
+      purchase(createStudent().id, base.course.id, 3000, daysAgo(10));
+      enroll(createStudent().id, base.course.id, daysAgo(10));
+      enroll(createStudent().id, base.course.id, daysAgo(12));
+      purchase(createStudent().id, base.course.id, 2000, daysAgo(40));
+      enroll(createStudent().id, base.course.id, daysAgo(40));
+      purchase(createStudent().id, sibling.id, 9000, daysAgo(40));
+      enroll(createStudent().id, sibling.id, daysAgo(40));
+
+      const { comparison } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(comparison).toEqual({
+        previousGrossCents: 2000,
+        previousEarningsCents: 1600,
+        revenueChangePct: 50,
+        previousStudents: 1,
+        studentsChangePct: 100,
+      });
+    });
+
+    it("has no comparison for the all-time range", () => {
+      purchase(createStudent().id, base.course.id, 1000, daysAgo(400));
+
+      const { cards, comparison } = getCourseAnalytics(base.course.id, "all", NOW);
+
+      expect(cards.grossCents).toBe(1000);
+      expect(comparison).toBeNull();
+    });
+
+    it("reports no completion figures for a course nobody enrolled in", () => {
+      const { cards } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(cards.students).toBe(0);
+      expect(cards.strictCompletionRate).toBeNull();
+      expect(cards.averageProgress).toBeNull();
+    });
+  });
+
+  it("groups that course's revenue by country within the range, largest first", () => {
+    const sibling = createCourse(schema.CourseStatus.Published);
+    purchase(createStudent().id, base.course.id, 1500, daysAgo(1), "US");
+    purchase(createStudent().id, base.course.id, 1000, daysAgo(2), "US");
+    purchase(createStudent().id, base.course.id, 4000, daysAgo(3), "DE");
+    purchase(createStudent().id, base.course.id, 200, daysAgo(4), null);
+    purchase(createStudent().id, base.course.id, 9000, daysAgo(31), "IN");
+    purchase(createStudent().id, sibling.id, 8000, daysAgo(1), "FR");
+
+    const { revenueByCountry } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+    expect(revenueByCountry).toEqual([
+      { country: "DE", grossCents: 4000 },
+      { country: "US", grossCents: 2500 },
+      { country: null, grossCents: 200 },
+    ]);
+  });
+
+  describe("top buyers", () => {
+    it("ranks the top 5 by gross spent on that course, breaking ties by seats bought", () => {
+      const sibling = createCourse(schema.CourseStatus.Published);
+      const team = createStudent();
+      const solo = createStudent();
+      teamPurchase(team.id, base.course.id, 5000, daysAgo(3), 4, 1);
+      purchase(solo.id, base.course.id, 5000, daysAgo(2));
+      // Spending on the sibling course doesn't lift solo above team.
+      purchase(solo.id, sibling.id, 9000, daysAgo(2));
+      const others = [4000, 3000, 2000, 1000].map((amount) => {
+        const buyer = createStudent();
+        purchase(buyer.id, base.course.id, amount, daysAgo(1));
+        return buyer;
+      });
+      // Outside the range.
+      purchase(createStudent().id, base.course.id, 99000, daysAgo(31));
+
+      const { topBuyers } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(topBuyers.map((b) => [b.userId, b.grossCents])).toEqual([
+        [team.id, 5000],
+        [solo.id, 5000],
+        [others[0].id, 4000],
+        [others[1].id, 3000],
+        [others[2].id, 2000],
+      ]);
+      expect(topBuyers[0]).toMatchObject({
+        name: team.name,
+        email: team.email,
+        seatsBought: 4,
+        seatsClaimed: 1,
+        seatsUnclaimed: 3,
+        courses: [{ courseId: base.course.id, title: base.course.title }],
+        lastPurchasedAt: daysAgo(3),
+      });
+      expect(topBuyers[1].courses).toEqual([
+        { courseId: base.course.id, title: base.course.title },
+      ]);
+    });
   });
 });
